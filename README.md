@@ -96,3 +96,32 @@ Para vincular este proyecto a tu cuenta personal de GitHub:
 ---
 
 Desarrollado para la comunidad de música en vivo y gastronomía de Buenos Aires.
+
+## Reservas estilo Airbnb (bares = anfitriones, músicos = huéspedes)
+
+Flujo: el bar **publica una fecha** → el músico **solicita** (o reserva al instante) → el bar **acepta** →
+el bar **paga** (el dinero queda retenido) → se hace el show → se libera el pago → **reseñas cruzadas**.
+Estados: `solicitada → aceptada → confirmada → realizada` (+ `rechazada`, `cancelada`, `expirada`).
+
+- **Comisión configurable** en `app_settings` (`venue_fee_bps`, `musician_fee_bps`, 100 bps = 1%). Por defecto **0**. Se congela al pagar.
+- **Cancelación** según política del bar (flexible / moderada / estricta). Si cancela el músico, el bar recibe reembolso total y el músico suma una cancelación tardía si faltaban menos de 24 h.
+- **Reseñas**: solo tras un show realizado, una por parte; se publican cuando ambos reseñan o a los 14 días.
+- **Disputas**: cualquiera de las partes puede reportar un problema tras empezar el show; el pago queda retenido hasta que el equipo resuelve (`admin_resolve_dispute`).
+- Toda escritura pasa por funciones RPC (`supabase/migrations/20261019000000_reservas.sql`); los clientes solo leen, con RLS por participante.
+- Cliente: `src/lib/bookingsApi.ts` (RPC + mensajes de error en español) y `src/domain/bookingRules.ts` (reglas de dinero/estados para previsualizar en la UI).
+
+### Aplicar en Supabase
+1. Ejecutar `supabase-schema.sql` (si no está aplicado) y luego `supabase/migrations/20261019000000_reservas.sql` en el SQL Editor.
+2. Crear los perfiles desde el backend (service role): una fila en `profiles` que vincula cada usuario de Auth con su bar (`venue_id`) o músico (`musician_id`).
+3. Programar (pg_cron o Edge Function) cada 5–15 min: `select expire_stale_bookings(); select complete_due_bookings();` y a diario `select publish_due_reviews();`.
+
+> **Pagos simulados**: hoy `fund_booking` registra una retención con `provider = 'simulado'`. Falta integrar Mercado Pago (o similar) antes de cobrar dinero real.
+
+### Tests
+```bash
+bun run build && npm test            # unitarios (reglas, API cliente, bookingLogic)
+npm run test:db                       # requiere Postgres: TEST_DATABASE_URL=postgres://postgres:pw@localhost:5432/postgres
+```
+`test:db` crea una base temporal con el esquema real y corre: ~60 casos borde, una **simulación concurrente de 10 bares × 10 músicos** (4 semillas, con distintas comisiones) que verifica invariantes (sin dobles reservas, dinero que cuadra, reseñas y calificaciones consistentes, auditoría válida) y una prueba de paridad TypeScript ↔ SQL.
+**CI**: copiá `docs/ci.example.yml` a `.github/workflows/ci.yml` para correr todo en cada PR con un Postgres real.
+Para comprobar que las pruebas detectan fallos: `MUTATE=overlap npm run test:db` quita una protección a propósito y debe fallar.
