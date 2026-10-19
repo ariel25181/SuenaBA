@@ -10,7 +10,7 @@ pg.types.setTypeParser(1700, (v: string) => parseFloat(v));
 
 export const ADMIN_URL = process.env.TEST_DATABASE_URL || 'postgres://postgres:pw@localhost:5432/postgres';
 const ROOT = path.resolve(import.meta.dirname, '../..');
-const SQL_FILES = ['tests/db/00_supabase_stub.sql', 'supabase-schema.sql', 'supabase/migrations/20261019000000_reservas.sql'];
+const SQL_FILES = ['tests/db/00_supabase_stub.sql', 'supabase-schema.sql', 'supabase/migrations/20261019000000_reservas.sql', 'supabase/migrations/20261020000000_airbnb_extras.sql'];
 
 /** Crea una base limpia con el esquema real + migración y devuelve un Pool. */
 export async function createTestDb(name: string, poolSize = 30): Promise<pg.Pool> {
@@ -97,6 +97,22 @@ export function api(pool: pg.Pool) {
     publishDue: (o?: CallOpts) => asSystem(pool, async (c) => (await c.query('select public.publish_due_reviews() n')).rows[0].n as number, o),
     resolveDispute: (id: string, pct: number, o?: CallOpts) =>
       asSystem(pool, async (c) => (await c.query('select * from public.admin_resolve_dispute($1,$2)', [id, pct])).rows[0], o),
+    toggleFav: (a: Actor | string, kind: string, id: string, o?: CallOpts) => one(a, 'select public.toggle_favorite($1,$2) r', [kind, id], o).then((r: any) => r.r as boolean),
+    saveSearch: (a: Actor, name: string, filters: unknown, o?: CallOpts) => one(a, 'select * from public.save_search($1,$2)', [name, JSON.stringify(filters)], o),
+    deleteSearch: (a: Actor, id: string, o?: CallOpts) => one(a, 'select public.delete_saved_search($1) r', [id], o).then((r: any) => r.r as boolean),
+    markRead: (a: Actor | string | null, ids: string[] | null = null, o?: CallOpts) => one(a, 'select public.mark_notifications_read($1) n', [ids], o).then((r: any) => r.n as number),
+    search: (a: Actor | null, f: Record<string, unknown> = {}, o?: CallOpts) => {
+      const k = ['from','to','neighborhoods','genres','min_cachet','max_cachet','mode','min_rating','text','hide_busy','sort','limit','offset'];
+      const args = k.map((x) => (f[x] === undefined ? null : f[x]));
+      return asUser(pool, a ? a.userId : null, async (c) => (await c.query(
+        'select * from public.search_listings(p_from => $1, p_to => $2, p_neighborhoods => $3, p_genres => $4, p_min_cachet => $5, p_max_cachet => $6, p_mode => $7, p_min_rating => $8, p_text => $9, p_hide_busy => coalesce($10, false), p_sort => coalesce($11, \'date\'), p_limit => coalesce($12, 20), p_offset => coalesce($13, 0))', args)).rows, { role: a ? 'authenticated' : 'anon', ...o });
+    },
+    stats: (kind: string, id: string, o?: CallOpts) => asUser(pool, null, async (c) => (await c.query('select * from public.entity_stats($1,$2)', [kind, id])).rows, { role: 'anon', ...o }),
+    earnings: (a: Actor, o?: CallOpts) => one(a, 'select * from public.my_earnings()', [], o),
+    requestProfile: (userId: string, p: { role: string; name: string; neighborhood?: string | null; address?: string | null; bio?: string; evidence?: string | null }, o?: CallOpts) =>
+      one(userId, 'select * from public.request_profile($1,$2,$3,$4,$5,$6)', [p.role, p.name, p.neighborhood ?? null, p.address ?? null, p.bio ?? '', p.evidence ?? null], o),
+    reviewRequest: (id: string, approve: boolean, note = '', o?: CallOpts) => asSystem(pool, async (c) => (await c.query('select * from public.admin_review_profile_request($1,$2,$3)', [id, approve, note])).rows[0], o),
+    claimPending: (limit = 1000) => asSystem(pool, async (c) => (await c.query('select id from public.claim_pending_notifications($1)', [limit])).rows.map((r) => r.id as string)),
     q: async <R = any>(sql: string, params: unknown[] = []) => (await pool.query(sql, params)).rows as R[],
   };
 }
@@ -128,10 +144,10 @@ export async function seedActors(pool: pg.Pool, nBars: number, nMus: number, pre
 }
 
 export async function resetData(pool: pg.Pool) {
-  await pool.query(`truncate public.messages, public.booking_reviews, public.payments, public.booking_events,
+  await pool.query(`truncate public.notifications, public.favorites, public.saved_searches, public.profile_requests, public.messages, public.booking_reviews, public.payments, public.booking_events,
     public.bookings, public.listings, public.profiles cascade;
     delete from auth.users; delete from public.venues where id like 't-%' or id like 'sim-%'; delete from public.musicians where id like 't-%' or id like 'sim-%';
-    update public.app_settings set venue_fee_bps = 0, musician_fee_bps = 0, max_pending_requests = 20, request_ttl_hours = 48, fund_ttl_hours = 48, review_window_days = 14`);
+    update public.app_settings set venue_fee_bps = 0, musician_fee_bps = 0, max_pending_requests = 20, request_ttl_hours = 48, fund_ttl_hours = 48, review_window_days = 14, require_verification = false, superhost_min_shows = 5, superhost_min_rating = 4.7, superhost_max_cancel_pct = 2, superhost_min_response_pct = 90`);
 }
 
 const ALLOWED: Record<string, string[]> = {
@@ -225,5 +241,27 @@ export async function checkInvariants(pool: pg.Pool, opts: { singlePublishedAllo
     `select p.user_id from profiles p where p.role = 'musico' and p.late_cancellations <>
        (select count(*) from booking_events e join bookings b on b.id = e.booking_id
          where b.musician_id = p.musician_id and e.event = 'cancelada' and e.meta ->> 'by' = 'musico' and (e.meta ->> 'late')::boolean)`);
+
+  // 11. Notificaciones: cantidad exacta por evento, solo a participantes, tipos válidos
+  const KINDS = ['booking_requested','booking_instant','booking_accepted','booking_rejected','booking_listing_taken','booking_listing_cancelled','booking_funded',
+    'booking_cancelled','booking_expired','review_invite','booking_disputed','dispute_resolved','review_pending','message','search_match','profile_approved','profile_rejected'];
+  await expectEmpty('11a tipo de notificación desconocido', `select id, kind from notifications where kind <> all('{${KINDS.join(',')}}')`);
+  await expectEmpty('11b notificación de reserva a alguien que no participa',
+    `select n.id from notifications n join bookings b on b.id = n.booking_id
+     where n.user_id not in (select user_id from profiles where venue_id = b.venue_id or musician_id = b.musician_id)`);
+  const exp = (await q(`select coalesce(sum(case e.event
+      when 'cancelada' then case when e.meta ->> 'by' in ('bar','musico') then 1 else 2 end
+      when 'expirada' then 2 when 'realizada' then 2 when 'disputa_resuelta' then 2
+      when 'solicitada' then 1 when 'aceptada' then 1 when 'rechazada' then 1 when 'confirmada' then 1 when 'disputa' then 1 when 'resena' then 1 else 0 end), 0)::int n
+    from booking_events e`))[0].n;
+  const got = (await q(`select count(*)::int n from notifications where booking_id is not null and kind <> 'message'`))[0].n;
+  if (exp !== got) bad.push(`11c notificaciones de reservas: esperadas ${exp} según auditoría, hay ${got}`);
+  const msgs = (await q(`select (select count(*) from messages)::int m, (select count(*) from notifications where kind = 'message')::int n`))[0];
+  if (msgs.m !== msgs.n) bad.push(`11d mensajes ${msgs.m} ≠ notificaciones de mensaje ${msgs.n}`);
+  // 12. Topes
+  await expectEmpty('12a músico con más solicitudes pendientes que el tope',
+    `select musician_id from bookings where status = 'solicitada' group by 1 having count(*) > (select max_pending_requests from app_settings)`);
+  await expectEmpty('12b más de 10 búsquedas guardadas', `select user_id from saved_searches group by 1 having count(*) > 10`);
+  await expectEmpty('12c más de 500 favoritos', `select user_id from favorites group by 1 having count(*) > 500`);
   return bad;
 }

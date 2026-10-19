@@ -54,6 +54,12 @@ async function scenario(seed: number, fees: Fees) {
   const listingIds: string[] = [];
   const asBookings = async (status: string) => (await A.q(`select b.*, l.booking_mode from bookings b join listings l on l.id = b.listing_id where b.status = $1`, [status]));
 
+  // ================= Fase 0: los músicos guardan búsquedas (alertas) y los bares/músicos marcan favoritos
+  const NEIGH = ['Palermo Soho', 'San Telmo', 'Villa Crespo'];
+  await A.q(`update venues set neighborhood = (array['Palermo Soho','San Telmo','Villa Crespo'])[1 + (length(id) + ascii(right(id,1))) % 3] where id like 'sim-%'`);
+  await all(mus.flatMap((m) => Array.from({ length: 1 + Math.floor(R() * 3) }, () =>
+    attempt('save_search', () => A.saveSearch(m, 'alerta', chance(0.5) ? { neighborhoods: [pick(NEIGH)] } : { minCachet: pick([0, 100000]), mode: pick(['instant', 'approval']) })))));
+
   // ================= Fase 1: los 10 bares publican fechas a la vez
   await all(bars.flatMap((bar) => Array.from({ length: 14 }, () => {
     const { starts, ends } = slot(5 + Math.floor(R() * 10), Math.floor(R() * 3));
@@ -72,6 +78,20 @@ async function scenario(seed: number, fees: Fees) {
       const prop = chance(0.2) ? pick([10000, 90000, 300000]) : null;
       return attempt('request', () => A.request(m, id, prop, chance(0.3) ? 'Hola, somos una banda…' : ''));
     })));
+
+    // Actividad concurrente de descubrimiento: búsquedas, favoritos, lectura de notificaciones y workers de entrega
+    await all([
+      ...mus.flatMap((m) => [
+        attempt('search', () => A.search(m, { neighborhoods: chance(0.5) ? [pick(NEIGH)] : undefined, hide_busy: chance(0.5), sort: pick(['date', 'cachet_desc', 'rating_desc']), limit: 10, offset: chance(0.3) ? 10 : 0 })),
+        attempt('fav', () => A.toggleFav(m, 'venue', pick(bars).entityId)),
+        attempt('fav', () => A.toggleFav(m, 'listing', pick(listingIds))),
+        attempt('mark_read', () => A.markRead(m)),
+      ]),
+      ...bars.flatMap((b) => [attempt('fav', () => A.toggleFav(b, 'musician', pick(mus).entityId)), attempt('mark_read', () => A.markRead(b))]),
+      attempt('search_anon', () => A.search(null, { limit: 20 })),
+      attempt('stats', () => A.stats('venue', pick(bars).entityId)),
+      attempt('claim', () => A.claimPending(50)), attempt('claim', () => A.claimPending(50)),
+    ]);
 
     // ================= Fase 3: los bares responden en paralelo (+ duplicados y retiros en carrera)
     const pending = await asBookings('solicitada');
@@ -150,6 +170,15 @@ async function scenario(seed: number, fees: Fees) {
   const T3 = new Date(T1.getTime() + 16 * D);
   await all([attempt('publish_job', () => A.publishDue({ now: T3 })), attempt('publish_job', () => A.publishDue({ now: T3 }))]);
 
+  await all([...bars, ...mus].map((x) => attempt('earnings', () => A.earnings(x))));
+  // dos workers vacían la cola en lotes (máx. 500 por lote) sin entregar nada dos veces
+  const claimed: string[] = [];
+  const drain = async () => { for (;;) { const got = await A.claimPending(500); if (!got.length) return; claimed.push(...got); } };
+  await all([drain(), drain()]);
+  if (new Set(claimed).size !== claimed.length) unexpected.push('una notificación se entregó dos veces');
+  const undelivered = (await A.q('select count(*)::int n from notifications where delivered_at is null'))[0].n;
+  if (undelivered) unexpected.push(`quedaron ${undelivered} notificaciones sin entregar tras vaciar la cola`);
+
   // ================= Verificación final
   const violations = await checkInvariants(pool, { singlePublishedAllowed: true });
   const byStatus = Object.fromEntries((await A.q(`select status, count(*)::int n from bookings group by 1 order by 1`)).map((r) => [r.status, r.n]));
@@ -159,7 +188,9 @@ async function scenario(seed: number, fees: Fees) {
   const reviews = (await A.q(`select count(*)::int total, count(published_at)::int publicadas from booking_reviews`))[0];
   const events = (await A.q(`select count(*)::int n from booking_events`))[0].n;
   const late = (await A.q(`select coalesce(sum(late_cancellations),0)::int n from profiles`))[0].n;
-  return { ok, biz, unexpected, violations, byStatus, money, reviews, events, late, listings: listingIds.length };
+  const notifCount = (await A.q('select count(*)::int n from notifications'))[0].n, alerts = (await A.q(`select count(*)::int n from notifications where kind = 'search_match'`))[0].n;
+  const favs = (await A.q('select count(*)::int n from favorites'))[0].n;
+  return { notifCount, alerts, favs, ok, biz, unexpected, violations, byStatus, money, reviews, events, late, listings: listingIds.length };
 }
 
 const CONFIGS: [number, Fees][] = [[1, { v: 0, m: 0 }], [2, { v: 300, m: 700 }], [3, { v: 500, m: 500 }], [4, { v: 0, m: 1000 }]];
@@ -173,6 +204,7 @@ describe('Simulación concurrente: 10 bares × 10 músicos', () => {
       console.log('  dinero (ARS):', JSON.stringify(r.money), '| reseñas:', JSON.stringify(r.reviews), '| cancelaciones tardías de músicos:', r.late);
       const top = Object.entries(r.biz).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k}=${v}`).join(', ');
       console.log('  rechazos más frecuentes:', top);
+      console.log(`  notificaciones: ${r.notifCount} (alertas de búsqueda: ${r.alerts}) · favoritos: ${r.favs}`);
 
       assert.deepEqual(r.unexpected, [], 'errores inesperados (deadlocks, violaciones de constraints, etc.):\n' + r.unexpected.slice(0, 10).join('\n'));
       assert.deepEqual(r.violations, [], 'invariantes violadas:\n' + r.violations.join('\n'));
@@ -181,6 +213,8 @@ describe('Simulación concurrente: 10 bares × 10 músicos', () => {
       assert.ok(contention > 0, 'no hubo contención real entre operaciones');
       for (const st of ['realizada', 'cancelada', 'rechazada', 'expirada']) assert.ok((r.byStatus[st] ?? 0) > 0, `ninguna reserva terminó en ${st}`);
       assert.ok(r.reviews.publicadas > 0);
+      assert.ok(r.alerts > 0, 'ninguna alerta de búsqueda se disparó');
+      assert.ok((r.ok['search'] ?? 0) > 0 && (r.ok['fav'] ?? 0) > 0);
       const m = r.money;
       assert.equal(m.cobrado, m.reembolsado + m.pagado_musicos + m.plataforma + m.retenido, 'el dinero total no cuadra');
       if (fees.v === 0 && fees.m === 0) assert.equal(m.plataforma, 0, 'comisión 0 no debe generar ganancia');

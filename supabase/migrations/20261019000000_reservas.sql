@@ -43,7 +43,12 @@ create table if not exists public.app_settings (
   request_ttl_hours integer not null default 48,
   fund_ttl_hours integer not null default 48,
   review_window_days integer not null default 14,
-  max_pending_requests integer not null default 20
+  max_pending_requests integer not null default 20,
+  require_verification boolean not null default false,        -- exigir perfil verificado para publicar/reservar
+  superhost_min_shows integer not null default 5,
+  superhost_min_rating numeric not null default 4.7,
+  superhost_max_cancel_pct numeric not null default 2,
+  superhost_min_response_pct numeric not null default 90
 );
 insert into public.app_settings default values on conflict do nothing;
 
@@ -57,6 +62,7 @@ create table if not exists public.profiles (
   venue_id text unique references public.venues(id),
   musician_id text unique references public.musicians(id),
   suspended boolean not null default false,
+  verified boolean not null default false,
   late_cancellations integer not null default 0,
   created_at timestamptz not null default now(),
   check ((role = 'bar' and venue_id is not null and musician_id is null)
@@ -102,6 +108,7 @@ create table if not exists public.bookings (
   cancellation_policy text not null,
   respond_by timestamptz not null,
   fund_by timestamptz,
+  responded_at timestamptz,
   cancelled_by text check (cancelled_by in ('bar','musico','sistema')),
   cancel_reason text,
   disputed_at timestamptz,
@@ -265,7 +272,7 @@ $$;
 -- 8. Helpers internos
 -- ------------------------------------------------------------------------------
 create or replace function public.app_now() returns timestamptz
-language sql stable as $$
+language sql stable security definer set search_path = public, pg_temp as $$
   select case when s.allow_clock_override and nullif(current_setting('app.now', true), '') is not null
               then current_setting('app.now')::timestamptz else now() end
   from public.app_settings s limit 1
@@ -288,15 +295,16 @@ returns void language sql security definer set search_path = public, pg_temp as 
   values (p_booking, coalesce(auth.uid()::text, 'sistema'), p_event, p_from, p_to, p_meta)
 $$;
 
--- Bloquea primero la publicación y luego la reserva (orden fijo: evita deadlocks)
+-- Bloquea primero la publicación y luego la reserva (orden fijo: evita deadlocks).
+-- Usa FOR NO KEY UPDATE para no chocar con los chequeos de claves foráneas (mensajes, notificaciones, reseñas).
 create or replace function public._lock_booking(p_id uuid) returns public.bookings
 language plpgsql security definer set search_path = public, pg_temp as $$
 declare lid uuid; b public.bookings;
 begin
   select listing_id into lid from public.bookings where id = p_id;
   if not found then raise exception 'booking_not_found' using errcode = 'P0001'; end if;
-  perform 1 from public.listings where id = lid for update;
-  select * into b from public.bookings where id = p_id for update;
+  perform 1 from public.listings where id = lid for no key update;
+  select * into b from public.bookings where id = p_id for no key update;
   return b;
 end $$;
 
@@ -322,7 +330,7 @@ begin
   select * into l from public.listings where id = b.listing_id;
   update public.listings set status = 'reservada' where id = l.id;
   begin
-    update public.bookings set status = 'aceptada', updated_at = public.app_now(),
+    update public.bookings set status = 'aceptada', updated_at = public.app_now(), responded_at = coalesce(responded_at, public.app_now()),
       fund_by = least(public.app_now() + make_interval(hours => s.fund_ttl_hours), l.starts_at - interval '1 hour')
     where id = b.id returning * into r;
   exception when exclusion_violation then
@@ -357,7 +365,7 @@ create or replace function public._settle(b public.bookings, p_pct integer) retu
 language plpgsql security definer set search_path = public, pg_temp as $$
 declare pay public.payments; a record;
 begin
-  select * into pay from public.payments where booking_id = b.id for update;
+  select * into pay from public.payments where booking_id = b.id for no key update;
   if not found then raise exception 'payment_missing' using errcode = 'P0001'; end if;
   if pay.status <> 'held' then raise exception 'payment_already_settled' using errcode = 'P0001'; end if;
   select * into a from public.settle_amounts(pay.cachet_ars, pay.venue_fee_ars, pay.musician_fee_bps, p_pct);
@@ -382,13 +390,13 @@ language plpgsql security definer set search_path = public, pg_temp as $$
 declare n integer; sm numeric; keys text[]; k text; bd jsonb := '{}'; base jsonb; bc integer; br numeric; ksum numeric;
 begin
   if p_kind = 'venue' then
-    perform 1 from public.venues where id = p_id for update;
+    perform 1 from public.venues where id = p_id for no key update;
     select base_rating, base_count, base_breakdown into br, bc, base from public.venues where id = p_id;
     keys := array['soundQuality','paymentReliability','hospitality','respect'];
     select count(*), coalesce(sum(rating), 0) into n, sm from public.booking_reviews
       where author_role = 'musico' and target_id = p_id and published_at is not null;
   else
-    perform 1 from public.musicians where id = p_id for update;
+    perform 1 from public.musicians where id = p_id for no key update;
     select base_rating, base_count, base_breakdown into br, bc, base from public.musicians where id = p_id;
     keys := array['punctuality','liveSound','crowdDrawing','professionalism'];
     select count(*), coalesce(sum(rating), 0) into n, sm from public.booking_reviews
@@ -418,6 +426,7 @@ declare p public.profiles; l public.listings;
 begin
   p := public.current_profile();
   if p.role <> 'bar' then raise exception 'forbidden_role' using errcode = 'P0001'; end if;
+  if (select require_verification from public.app_settings) and not p.verified then raise exception 'not_verified' using errcode = 'P0001'; end if;
   if p_starts_at is null or p_ends_at is null or p_cachet_ars is null then raise exception 'invalid_listing' using errcode = 'P0001'; end if;
   if p_starts_at <= public.app_now() + interval '2 hours' then raise exception 'starts_too_soon' using errcode = 'P0001'; end if;
   if p_starts_at > public.app_now() + interval '1 year' then raise exception 'starts_too_far' using errcode = 'P0001'; end if;
@@ -438,7 +447,7 @@ language plpgsql security definer set search_path = public, pg_temp as $$
 declare p public.profiles; l public.listings; rid uuid;
 begin
   p := public.current_profile();
-  select * into l from public.listings where id = p_listing_id for update;
+  select * into l from public.listings where id = p_listing_id for no key update;
   if not found or p.venue_id is distinct from l.venue_id then raise exception 'listing_not_found' using errcode = 'P0001'; end if;
   if l.status = 'cancelada' then return l; end if;
   if l.status = 'reservada' then raise exception 'listing_has_booking' using errcode = 'P0001'; end if;
@@ -461,7 +470,10 @@ begin
   p := public.current_profile();
   if p.role <> 'musico' then raise exception 'forbidden_role' using errcode = 'P0001'; end if;
   select * into s from public.app_settings;
-  select * into l from public.listings where id = p_listing_id for update;
+  if s.require_verification and not p.verified then raise exception 'not_verified' using errcode = 'P0001'; end if;
+  -- serializa las solicitudes de un mismo músico para que el tope de pendientes no se pueda saltear en paralelo
+  perform pg_advisory_xact_lock(hashtextextended('req:' || p.musician_id, 0));
+  select * into l from public.listings where id = p_listing_id for no key update;
   if not found or l.status = 'cancelada' then raise exception 'listing_not_found' using errcode = 'P0001'; end if;
   if l.status <> 'abierta' then raise exception 'listing_not_open' using errcode = 'P0001'; end if;
   if l.starts_at <= public.app_now() + interval '2 hours' then raise exception 'listing_too_soon' using errcode = 'P0001'; end if;
@@ -497,7 +509,7 @@ begin
   if public.app_now() > b.respond_by then return public._expire(b); end if;
   select * into l from public.listings where id = b.listing_id;
   if not p_accept then
-    update public.bookings set status = 'rechazada', cancelled_by = 'bar', cancel_reason = left(coalesce(p_reason, ''), 500), updated_at = public.app_now()
+    update public.bookings set status = 'rechazada', cancelled_by = 'bar', cancel_reason = left(coalesce(p_reason, ''), 500), updated_at = public.app_now(), responded_at = public.app_now()
     where id = b.id returning * into b;
     perform public._log(b.id, 'rechazada', 'solicitada', 'rechazada');
     return b;
