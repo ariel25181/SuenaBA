@@ -20,6 +20,7 @@ import {
   INITIAL_LIVE_SHOWS,
 } from '../data/seedData.ts';
 import { calculateNewRating, calculateNewBreakdown } from '../utils/bookingLogic.ts';
+import { supabase } from '../lib/supabaseClient.ts';
 
 export interface NotificationItem {
   id: string;
@@ -166,6 +167,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     localStorage.setItem(`${STORAGE_KEY_PREFIX}notifications`, JSON.stringify(notifications));
   }, [notifications]);
+
+  // Synchronize with Supabase Cloud Database
+  useEffect(() => {
+    async function syncWithSupabase() {
+      if (!supabase) return;
+      try {
+        const { data: vData } = await supabase.from('venues').select('*');
+        if (vData && vData.length > 0) {
+          setVenues(vData);
+        }
+
+        const { data: mData } = await supabase.from('musicians').select('*');
+        if (mData && mData.length > 0) {
+          setMusicians(mData);
+        }
+
+        const { data: cData } = await supabase.from('open_calls').select('*');
+        if (cData && cData.length > 0) {
+          setOpenCalls(cData);
+        }
+
+        const { data: aData } = await supabase.from('musician_availabilities').select('*');
+        if (aData && aData.length > 0) {
+          setMusicianAvailabilities(aData);
+        }
+
+        const { data: sData } = await supabase.from('live_shows').select('*');
+        if (sData && sData.length > 0) {
+          setLiveShows(sData);
+        }
+      } catch {
+        // Fallback to local storage if offline or tables not yet migrated
+      }
+    }
+    syncWithSupabase();
+  }, []);
 
   const currentMusician = musicians.find((m) => m.id === activeMusicianId) || musicians[0];
   const currentVenue = venues.find((v) => v.id === activeVenueId) || venues[0];
