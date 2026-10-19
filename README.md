@@ -123,5 +123,5 @@ bun run build && npm test            # unitarios (reglas, API cliente, bookingLo
 npm run test:db                       # requiere Postgres: TEST_DATABASE_URL=postgres://postgres:pw@localhost:5432/postgres
 ```
 `test:db` crea una base temporal con el esquema real y corre: ~60 casos borde, una **simulación concurrente de 10 bares × 10 músicos** (4 semillas, con distintas comisiones) que verifica invariantes (sin dobles reservas, dinero que cuadra, reseñas y calificaciones consistentes, auditoría válida) y una prueba de paridad TypeScript ↔ SQL.
-**CI**: copiá `docs/ci.example.yml` a `.github/workflows/ci.yml` para correr todo en cada PR con un Postgres real.
+**CI**: el workflow `.github/workflows/ci.yml` corre todo en cada PR con un Postgres real.
 Para comprobar que las pruebas detectan fallos: `MUTATE=overlap npm run test:db` quita una protección a propósito y debe fallar.
