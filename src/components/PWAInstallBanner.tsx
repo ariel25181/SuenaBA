@@ -61,7 +61,7 @@ export const PWAInstallBanner: React.FC = () => {
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div className="flex items-center space-x-2.5">
                 <div className="w-10 h-10 rounded-xl overflow-hidden border border-amber-500/40 shrink-0">
-                  <img src="/pwa-192x192.png" alt="SuenaBA Icon" className="w-full h-full object-cover" />
+                  <img src="./pwa-192x192.png" alt="SuenaBA Icon" className="w-full h-full object-cover" />
                 </div>
                 <div>
                   <h3 className="font-bold text-slate-100 font-display text-base">
