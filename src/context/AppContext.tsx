@@ -21,6 +21,7 @@ import {
 } from '../data/seedData.ts';
 import { calculateNewRating, calculateNewBreakdown } from '../utils/bookingLogic.ts';
 import { supabase } from '../lib/supabaseClient.ts';
+import { mapVenue, mapMusician, mapOpenCall, mapAvailability, mapLiveShow } from '../lib/supabaseMappers.ts';
 
 export interface NotificationItem {
   id: string;
@@ -175,27 +176,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       try {
         const { data: vData } = await supabase.from('venues').select('*');
         if (vData && vData.length > 0) {
-          setVenues(vData);
+          setVenues(vData.map(mapVenue));
         }
 
         const { data: mData } = await supabase.from('musicians').select('*');
         if (mData && mData.length > 0) {
-          setMusicians(mData);
+          setMusicians(mData.map(mapMusician));
         }
 
         const { data: cData } = await supabase.from('open_calls').select('*');
         if (cData && cData.length > 0) {
-          setOpenCalls(cData);
+          setOpenCalls(cData.map(mapOpenCall));
         }
 
         const { data: aData } = await supabase.from('musician_availabilities').select('*');
         if (aData && aData.length > 0) {
-          setMusicianAvailabilities(aData);
+          setMusicianAvailabilities(aData.map(mapAvailability));
         }
 
         const { data: sData } = await supabase.from('live_shows').select('*');
         if (sData && sData.length > 0) {
-          setLiveShows(sData);
+          setLiveShows(sData.map(mapLiveShow));
         }
       } catch {
         // Fallback to local storage if offline or tables not yet migrated
