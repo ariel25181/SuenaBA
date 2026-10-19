@@ -16,6 +16,7 @@ import { DirectOfferModal } from './components/modals/DirectOfferModal.tsx';
 import { ShowDetailModal } from './components/modals/ShowDetailModal.tsx';
 import { ReviewModal } from './components/modals/ReviewModal.tsx';
 import { NotificationsDrawer } from './components/modals/NotificationsDrawer.tsx';
+import { PWAInstallBanner } from './components/PWAInstallBanner.tsx';
 
 import { VenueOpenCall, MusicianAvailability, LiveShowConfirmed } from './types/index.ts';
 import { Wifi, Battery, Signal, Sparkles } from 'lucide-react';
@@ -131,6 +132,9 @@ function MainApp() {
           onOpenNotifications={() => setIsNotificationsOpen(true)}
           onSelectTab={setActiveTab}
         />
+
+        {/* PWA In-App Install Prompt Banner */}
+        <PWAInstallBanner />
 
         {/* Current Active Role Badge bar */}
         <div className="bg-slate-900/60 border-b border-slate-800/60 px-4 py-1.5 flex items-center justify-between text-[11px] text-slate-400">
