@@ -1,0 +1,6 @@
+{
+  "name": "SuenaBA - Red de Música en Vivo & Bares de Buenos Aires",
+  "description": "App para conectar bares y restaurantes con músicos en Buenos Aires: convocatorias de fechas, disponibilidad de artistas, cartelera de shows porteños y sistema de reputación bilateral estilo Airbnb.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
