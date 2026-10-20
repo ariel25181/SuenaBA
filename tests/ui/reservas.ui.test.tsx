@@ -8,6 +8,8 @@ import { createTestDb, dropTestDb, resetData, seedActors, api, checkInvariants, 
 import { createPgClient } from './pgClient.ts';
 import { SessionProvider } from '../../src/context/SessionContext.tsx';
 import { ReservasApp } from '../../src/components/reservas/ReservasApp.tsx';
+import { TOUR_VERSION } from '../../src/content/tour.ts';
+import { latestNovedadId } from '../../src/content/novedades.ts';
 
 const DB = 'suenaba_ui';
 let pool: pg.Pool, A: Api;
@@ -41,11 +43,14 @@ const em = (a: Actor) => `${a.entityId}@t.com`;
 
 before(async () => { pool = await createTestDb(DB, 20); A = api(pool); });
 after(async () => { cleanup(); (globalThis as any).window?.close?.(); await dropTestDb(pool, DB); });
-beforeEach(async () => { await resetData(pool); const w = await seedActors(pool, 2, 2); [bar1, bar2] = w.bars; [m1, m2] = w.mus; });
+/** Preferencias "ya hizo el tour y vio las novedades" para que no estorben en los demás flujos. */
+const presetPrefs = (audience: string | null = 'musico') => localStorage.setItem('suenaba:prefs:v1', JSON.stringify({ audience, tourVersion: TOUR_VERSION, whatsNewSeen: latestNovedadId() }));
+beforeEach(async () => { localStorage.clear(); presetPrefs(); await resetData(pool); const w = await seedActors(pool, 2, 2); [bar1, bar2] = w.bars; [m1, m2] = w.mus; });
 afterEach(async () => { cleanup(); const bad = await checkInvariants(pool, { singlePublishedAllowed: true }); assert.deepEqual(bad, [], bad.join('\n')); });
 
 describe('Acceso y alta de perfil', () => {
   it('login con error, creación de cuenta, solicitud de perfil y aprobación', async () => {
+    presetPrefs('anfitrion');
     const m = mount(null);
     await login('nadie@x.com');
     assert.match((await screen.findByRole('alert', {}, T)).textContent!, /incorrectos/);

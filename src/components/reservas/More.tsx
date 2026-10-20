@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useSession } from '../../context/SessionContext.tsx';
+import { useHelp } from '../../context/PrefsContext.tsx';
 import type { Profile } from '../../lib/bookingsApi.ts';
 import { POLICY_LABEL } from '../../domain/bookingRules.ts';
 import { Banner, Btn, Card, Empty, Field, Pill, ars, fmtDateTime, fmtShort, inputCls, useAction, useLoad } from './ui.tsx';
@@ -97,6 +98,7 @@ export const HostPanel: React.FC<{ profile: Profile }> = ({ profile }) => {
 
 export const AccountView: React.FC<{ profile: Profile }> = ({ profile }) => {
   const { api, signOut, state } = useSession();
+  const help = useHelp();
   const act = useAction();
   const { data, loading, reload } = useLoad(async () => ({
     earnings: await api.earnings(),
@@ -125,6 +127,9 @@ export const AccountView: React.FC<{ profile: Profile }> = ({ profile }) => {
       {!isBar && <Card className="space-y-2"><h3 className="text-sm font-bold text-slate-100">Alertas de búsqueda</h3>
         {searches.length === 0 && <p className="text-xs text-slate-500">Guardá una búsqueda en Explorar y te avisamos cuando se publique una fecha que coincida.</p>}
         {searches.map((s) => <div key={s.id} className="flex items-center justify-between text-sm text-slate-200"><span>{s.name}</span><Btn kind="ghost" aria-label={`Borrar alerta ${s.name}`} onClick={async () => { await act.run(() => api.deleteSearch(s.id)); reload(); }}>Borrar</Btn></div>)}</Card>}
+      <Card className="space-y-2"><h3 className="text-sm font-bold text-slate-100">Ayuda</h3>
+        <Btn kind="ghost" className="w-full" onClick={help.openTour}>Ver el tour otra vez</Btn>
+        <Btn kind="ghost" className="w-full" onClick={help.openNovedades}>Ver novedades{help.unread > 0 ? ` (${help.unread})` : ''}</Btn></Card>
       {act.error && <Banner kind="error">{act.error}</Banner>}
       <Btn kind="ghost" className="w-full" onClick={signOut}>Cerrar sesión</Btn>
     </div>

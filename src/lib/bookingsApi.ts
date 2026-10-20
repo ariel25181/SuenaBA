@@ -38,6 +38,10 @@ export interface PaymentInfo { status: 'held' | 'released' | 'refunded' | 'parti
 export interface EntityLite { id: string; name: string; photo: string | null; subtitle: string }
 export interface Fees { venueFeeBps: number; musicianFeeBps: number }
 
+export interface UserPrefs { audience: 'anfitrion' | 'musico' | 'publico' | null; tourVersion: number; whatsNewSeen: number }
+export interface PublicShow { bookingId: string; venueId: string; venueName: string; neighborhood: string; address: string; coverPhoto: string | null; musicianName: string; musicianFormat: string; genres: string[]; startsAt: string; endsAt: string; totalCount: number }
+export interface ShowFilters { neighborhoods?: string[]; genres?: string[]; from?: string; to?: string; limit?: number; offset?: number }
+
 const num = (v: any) => (v === null || v === undefined ? 0 : Number(v));
 
 export const mapListing = (r: Row): Listing => ({
@@ -74,6 +78,10 @@ export const mapProfile = (r: Row): Profile => ({ userId: r.user_id, role: r.rol
 export const mapProfileRequest = (r: Row): ProfileRequest => ({ id: r.id, role: r.role, displayName: r.display_name, status: r.status, reviewerNote: r.reviewer_note ?? null, createdAt: r.created_at });
 export const mapEvent = (r: Row): BookingEvent => ({ id: Number(r.id), event: r.event, fromStatus: r.from_status ?? null, toStatus: r.to_status ?? null, at: r.at, meta: r.meta ?? {} });
 export const mapPayment = (r: Row): PaymentInfo => ({ status: r.status, chargedArs: num(r.charged_ars), cachetArs: num(r.cachet_ars), venueFeeArs: num(r.venue_fee_ars), refundedArs: num(r.refunded_ars), payoutArs: num(r.payout_ars), platformFeeArs: num(r.platform_fee_ars), provider: r.provider });
+
+export const mapPrefs = (r: Row): UserPrefs => ({ audience: r.audience ?? null, tourVersion: num(r.tour_version), whatsNewSeen: num(r.whats_new_seen) });
+export const mapShow = (r: Row): PublicShow => ({ bookingId: r.booking_id, venueId: r.venue_id, venueName: r.venue_name, neighborhood: r.neighborhood, address: r.address ?? '', coverPhoto: r.cover_photo ?? null,
+  musicianName: r.musician_name, musicianFormat: r.musician_format, genres: r.genres ?? [], startsAt: r.starts_at, endsAt: r.ends_at, totalCount: num(r.total_count) });
 
 export const mapMessage = (r: Row): Message => ({ id: r.id, bookingId: r.booking_id, senderRole: r.sender_role, body: r.body, createdAt: r.created_at });
 
@@ -138,6 +146,12 @@ export function createBookingsApi(client: RpcClient) {
     myProfileRequest: async () => (await read(client.from('profile_requests').select('*').order('created_at', { ascending: false }).limit(1), mapProfileRequest))[0] ?? null,
     requestProfile: (p: { role: 'bar' | 'musico'; displayName: string; neighborhood?: string; address?: string; bio?: string; evidenceUrl?: string }) =>
       call('request_profile', { p_role: p.role, p_display_name: p.displayName, p_neighborhood: p.neighborhood || null, p_address: p.address || null, p_bio: p.bio ?? '', p_evidence_url: p.evidenceUrl || null }, mapProfileRequest),
+    // Preferencias, tour y cartelera pública
+    getPrefs: async () => (await read(client.from('user_prefs').select('*'), mapPrefs))[0] ?? null,
+    savePrefs: async (p: { audience?: UserPrefs['audience']; tourVersion?: number; whatsNewSeen?: number }) =>
+      (await callRows('save_user_prefs', { p_audience: p.audience ?? null, p_tour_version: p.tourVersion ?? null, p_whats_new_seen: p.whatsNewSeen ?? null }, mapPrefs))[0],
+    upcomingShows: (f: ShowFilters = {}) => callRows('upcoming_shows', { p_from: f.from ?? null, p_to: f.to ?? null, p_neighborhoods: f.neighborhoods?.length ? f.neighborhoods : null,
+      p_genres: f.genres?.length ? f.genres : null, p_limit: f.limit ?? 20, p_offset: f.offset ?? 0 }, mapShow),
     // Detalle de reservas
     booking: async (id: string) => (await read(client.from('bookings').select('*').eq('id', id), mapBooking))[0] ?? null,
     bookingEvents: (bookingId: string) => read(client.from('booking_events').select('*').eq('booking_id', bookingId).order('id', { ascending: true }), mapEvent),

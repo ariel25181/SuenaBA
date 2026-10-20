@@ -99,6 +99,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   request_pending: 'Ya enviaste una solicitud y está en revisión.',
   invalid_request: 'Revisá los datos: nombre, barrio y dirección (para bares) son obligatorios.',
   invalid_evidence: 'El enlace debe empezar con https://',
+  invalid_prefs: 'No pudimos guardar tus preferencias.',
 };
 export const errorMessage = (code: string) => ERROR_MESSAGES[code] ?? 'Ocurrió un error inesperado. Probá de nuevo.';
 
