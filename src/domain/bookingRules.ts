@@ -88,5 +88,24 @@ export const ERROR_MESSAGES: Record<string, string> = {
   empty_message: 'El mensaje está vacío.',
   message_too_long: 'El mensaje es demasiado largo (máx. 2000 caracteres).',
   message_limit: 'Esta conversación llegó al límite de mensajes.',
+  not_verified: 'Tu perfil todavía no fue verificado.',
+  invalid_favorite: 'No se puede guardar ese favorito.',
+  target_not_found: 'Ese elemento ya no existe.',
+  favorites_limit: 'Llegaste al máximo de 500 favoritos.',
+  invalid_name: 'Poné un nombre de hasta 60 caracteres.',
+  invalid_filters: 'Los filtros de la búsqueda no son válidos.',
+  too_many_searches: 'Ya tenés 10 búsquedas guardadas. Borrá alguna para crear otra.',
+  profile_exists: 'Ya tenés un perfil creado.',
+  request_pending: 'Ya enviaste una solicitud y está en revisión.',
+  invalid_request: 'Revisá los datos: nombre, barrio y dirección (para bares) son obligatorios.',
+  invalid_evidence: 'El enlace debe empezar con https://',
 };
 export const errorMessage = (code: string) => ERROR_MESSAGES[code] ?? 'Ocurrió un error inesperado. Probá de nuevo.';
+
+export const POLICY_LABEL: Record<CancellationPolicy, string> = { flexible: 'Flexible', moderada: 'Moderada', estricta: 'Estricta' };
+export const POLICY_RULES: Record<CancellationPolicy, string> = {
+  flexible: 'Reembolso total hasta 24 h antes del show; después, 50%.',
+  moderada: 'Reembolso total hasta 72 h antes; 50% entre 72 h y 24 h; después, sin reembolso.',
+  estricta: 'Reembolso total hasta 7 días antes; 50% entre 7 días y 72 h; después, sin reembolso.',
+};
+export const hoursUntil = (iso: string, now: Date = new Date()) => (new Date(iso).getTime() - now.getTime()) / 3_600_000;

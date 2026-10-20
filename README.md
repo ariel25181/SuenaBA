@@ -110,9 +110,26 @@ Estados: `solicitada → aceptada → confirmada → realizada` (+ `rechazada`, 
 - Toda escritura pasa por funciones RPC (`supabase/migrations/20261019000000_reservas.sql`); los clientes solo leen, con RLS por participante.
 - Cliente: `src/lib/bookingsApi.ts` (RPC + mensajes de error en español) y `src/domain/bookingRules.ts` (reglas de dinero/estados para previsualizar en la UI).
 
+### Funciones tipo Airbnb incluidas
+| Función | Cómo funciona |
+|---|---|
+| **Publicar fechas** con calendario, cachet, backline, política de cancelación y modo (instantánea / con aprobación) | `create_listing`, panel "Mis fechas" |
+| **Búsqueda** por fecha, barrio, género, cachet, modo, calificación, texto; orden y paginación; ocultar fechas que se pisan con mis shows | `search_listings`, pestaña "Explorar" |
+| **Favoritos** (fechas, bares, músicos) | `toggle_favorite` |
+| **Alertas de búsqueda**: guardás filtros y te avisan cuando se publica una fecha que coincide | `save_search` + trigger |
+| **Notificaciones** internas por cada evento de la reserva y por mensajes (con cola de entrega para push/email) | tabla `notifications`, `claim_pending_notifications` |
+| **Chat** por reserva | `send_message` |
+| **Reserva, pago retenido, cancelación con reembolso, disputas, vencimientos** | ver más arriba |
+| **Reseñas cruzadas** que se publican cuando ambos reseñan o a los 14 días | `submit_review` |
+| **Superanfitrión / Superartista** (shows, calificación, cancelaciones y tasa de respuesta) | `entity_stats` |
+| **Verificación de perfiles**: solicitud → aprobación del equipo → perfil verificado (opcionalmente obligatoria) | `request_profile`, `admin_review_profile_request`, `app_settings.require_verification` |
+| **Ganancias / pagos** del bar y del músico | `my_earnings`, pestaña "Cuenta" |
+
+**Pantallas**: nueva pestaña **Reservas** en la app (login con Supabase Auth → alta de perfil → Explorar / Mis fechas / Reservas / Favoritos / Avisos / Cuenta). Código en `src/components/reservas/`. Las pantallas viejas (Cartelera, Convocatorias, etc.) siguen funcionando con su estado local.
+
 ### Aplicar en Supabase
-1. Ejecutar `supabase-schema.sql` (si no está aplicado) y luego `supabase/migrations/20261019000000_reservas.sql` en el SQL Editor.
-2. Crear los perfiles desde el backend (service role): una fila en `profiles` que vincula cada usuario de Auth con su bar (`venue_id`) o músico (`musician_id`).
+1. Ejecutar `supabase-schema.sql` (si no está aplicado) y luego, en orden, `supabase/migrations/20261019000000_reservas.sql` y `supabase/migrations/20261020000000_airbnb_extras.sql` en el SQL Editor.
+2. Los usuarios nuevos piden su perfil desde la app (`request_profile`); el equipo lo aprueba con `select admin_review_profile_request('<id>', true, 'ok')` (service role), que crea el bar/músico y el perfil verificado.
 3. Programar (pg_cron o Edge Function) cada 5–15 min: `select expire_stale_bookings(); select complete_due_bookings();` y a diario `select publish_due_reviews();`.
 
 > **Pagos simulados**: hoy `fund_booking` registra una retención con `provider = 'simulado'`. Falta integrar Mercado Pago (o similar) antes de cobrar dinero real.
@@ -121,6 +138,8 @@ Estados: `solicitada → aceptada → confirmada → realizada` (+ `rechazada`, 
 ```bash
 bun run build && npm test            # unitarios (reglas, API cliente, bookingLogic)
 npm run test:db                       # requiere Postgres: TEST_DATABASE_URL=postgres://postgres:pw@localhost:5432/postgres
+npm run test:ui                       # renderiza las pantallas (jsdom) contra un Postgres real, como usuarios con RLS
+npm run test:all
 ```
 `test:db` crea una base temporal con el esquema real y corre: ~60 casos borde, una **simulación concurrente de 10 bares × 10 músicos** (4 semillas, con distintas comisiones) que verifica invariantes (sin dobles reservas, dinero que cuadra, reseñas y calificaciones consistentes, auditoría válida) y una prueba de paridad TypeScript ↔ SQL.
 **CI**: el workflow `.github/workflows/ci.yml` corre todo en cada PR con un Postgres real.

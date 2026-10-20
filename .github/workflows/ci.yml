@@ -31,3 +31,6 @@ jobs:
       - run: npm run test:db
         env:
           TEST_DATABASE_URL: postgres://postgres:pw@localhost:5432/postgres
+      - run: npm run test:ui
+        env:
+          TEST_DATABASE_URL: postgres://postgres:pw@localhost:5432/postgres
