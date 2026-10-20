@@ -40,7 +40,7 @@ const clickAsync = async (name: string | RegExp) => fireEvent.click(await screen
 const em = (a: Actor) => `${a.entityId}@t.com`;
 
 before(async () => { pool = await createTestDb(DB, 20); A = api(pool); });
-after(async () => { await dropTestDb(pool, DB); });
+after(async () => { cleanup(); (globalThis as any).window?.close?.(); await dropTestDb(pool, DB); });
 beforeEach(async () => { await resetData(pool); const w = await seedActors(pool, 2, 2); [bar1, bar2] = w.bars; [m1, m2] = w.mus; });
 afterEach(async () => { cleanup(); const bad = await checkInvariants(pool, { singlePublishedAllowed: true }); assert.deepEqual(bad, [], bad.join('\n')); });
 
