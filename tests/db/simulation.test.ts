@@ -90,7 +90,7 @@ async function scenario(seed: number, fees: Fees) {
       ...bars.flatMap((b) => [attempt('fav', () => A.toggleFav(b, 'musician', pick(mus).entityId)), attempt('mark_read', () => A.markRead(b))]),
       attempt('search_anon', () => A.search(null, { limit: 20 })),
       attempt('stats', () => A.stats('venue', pick(bars).entityId)),
-      attempt('claim', () => A.claimPending(50)), attempt('claim', () => A.claimPending(50)),
+      ...[1, 2].map(() => attempt('claim', async () => { const ids = await A.claimPending(50); await all(ids.map((id) => A.completeDelivery(id, true, null, true, false))); })),
     ]);
 
     // ================= Fase 3: los bares responden en paralelo (+ duplicados y retiros en carrera)
