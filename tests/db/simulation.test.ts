@@ -173,9 +173,9 @@ async function scenario(seed: number, fees: Fees) {
   await all([...bars, ...mus].map((x) => attempt('earnings', () => A.earnings(x))));
   // dos workers vacían la cola en lotes (máx. 500 por lote) sin entregar nada dos veces
   const claimed: string[] = [];
-  const drain = async () => { for (;;) { const got = await A.claimPending(500); if (!got.length) return; claimed.push(...got); } };
+  const drain = async () => { for (;;) { const got = await A.claimPending(200); if (!got.length) return; claimed.push(...got); await all(got.map((id) => A.completeDelivery(id, true, null, true, false))); } };
   await all([drain(), drain()]);
-  if (new Set(claimed).size !== claimed.length) unexpected.push('una notificación se entregó dos veces');
+  if (new Set(claimed).size !== claimed.length) unexpected.push('una notificación se reclamó dos veces');
   const undelivered = (await A.q('select count(*)::int n from notifications where delivered_at is null'))[0].n;
   if (undelivered) unexpected.push(`quedaron ${undelivered} notificaciones sin entregar tras vaciar la cola`);
 

@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useSession } from '../../context/SessionContext.tsx';
 import { useHelp } from '../../context/PrefsContext.tsx';
 import type { Profile } from '../../lib/bookingsApi.ts';
 import { POLICY_LABEL } from '../../domain/bookingRules.ts';
+import { disablePush, enablePush, pushState, type PushState } from '../../lib/push.ts';
 import { Banner, Btn, Card, Empty, Field, Pill, ars, fmtDateTime, fmtShort, inputCls, useAction, useLoad } from './ui.tsx';
 
 export const NotificationsView: React.FC<{ onOpenBooking: (id: string) => void; onChanged: () => void; refreshKey: number }> = ({ onOpenBooking, onChanged, refreshKey }) => {
@@ -96,6 +97,50 @@ export const HostPanel: React.FC<{ profile: Profile }> = ({ profile }) => {
   );
 };
 
+const PUSH_TEXT: Record<PushState, string> = {
+  unsupported: 'Este navegador no permite notificaciones. En el celular, instalá SuenaBA en la pantalla de inicio.',
+  no_key: 'Las notificaciones en el dispositivo todavía no están habilitadas en esta instalación.',
+  denied: 'Bloqueaste las notificaciones de este sitio. Activalas desde los ajustes del navegador.',
+  off: 'Desactivadas en este dispositivo.',
+  on: 'Activadas en este dispositivo.',
+};
+
+const NotificationSettings: React.FC<{ isBar: boolean }> = ({ isBar }) => {
+  const { api } = useSession();
+  const act = useAction();
+  const [prefs, setPrefs] = useState<import('../../lib/bookingsApi.ts').NotifPrefs | null>(null);
+  const latest = React.useRef(prefs); latest.current = prefs;
+  const chain = React.useRef<Promise<unknown>>(Promise.resolve());
+  const [push, setPush] = useState<PushState | null>(null);
+  useEffect(() => { api.notificationPrefs().then(setPrefs).catch(() => {}); pushState().then(setPush).catch(() => setPush('unsupported')); }, [api]);
+  if (!prefs) return null;
+
+  /** Cambios en fila: cada uno parte del último estado confirmado, así dos clics rápidos no se pisan. */
+  const change = (build: (cur: NonNullable<typeof prefs>) => { email?: boolean; mutedKinds?: string[] }) => {
+    chain.current = chain.current.then(() => act.run(async () => {
+      const cur = latest.current!;
+      const saved = await api.setNotificationPrefs(build(cur));
+      latest.current = saved; setPrefs(saved);
+    }));
+  };
+  const muted = new Set(prefs.mutedKinds);
+  const setMuted = (kind: string, on: boolean) => change((cur) => { const next = new Set(cur.mutedKinds); on ? next.delete(kind) : next.add(kind); return { mutedKinds: [...next] }; });
+  return (
+    <Card className="space-y-2" aria-label="Avisos">
+      <h3 className="text-sm font-bold text-slate-100">Avisos</h3>
+      <label className="flex items-center gap-2 text-sm text-slate-200"><input type="checkbox" checked={prefs.emailEnabled} onChange={(e) => { const on = e.target.checked; change(() => ({ email: on })); }} /> Recibir avisos por email</label>
+      <label className="flex items-center gap-2 text-sm text-slate-200"><input type="checkbox" checked={!muted.has('message')} onChange={(e) => setMuted('message', e.target.checked)} /> Avisar cuando me escriben en un chat</label>
+      {!isBar && <label className="flex items-center gap-2 text-sm text-slate-200"><input type="checkbox" checked={!muted.has('search_match')} onChange={(e) => setMuted('search_match', e.target.checked)} /> Avisar de fechas nuevas de mis alertas</label>}
+      <div className="rounded-xl bg-slate-950/60 p-2 space-y-2">
+        <p className="text-xs text-slate-400" role="status">{push ? PUSH_TEXT[push] : 'Verificando este dispositivo…'}</p>
+        {push === 'off' && <Btn onClick={async () => { const r = await act.run(() => enablePush(api)); if (r) setPush(r); }}>Activar avisos en este dispositivo</Btn>}
+        {push === 'on' && <Btn kind="ghost" onClick={async () => { const r = await act.run(() => disablePush(api)); if (r) setPush(r); }}>Desactivar en este dispositivo</Btn>}
+      </div>
+      {act.error && <Banner kind="error">{act.error}</Banner>}
+    </Card>
+  );
+};
+
 export const AccountView: React.FC<{ profile: Profile }> = ({ profile }) => {
   const { api, signOut, state } = useSession();
   const help = useHelp();
@@ -127,6 +172,7 @@ export const AccountView: React.FC<{ profile: Profile }> = ({ profile }) => {
       {!isBar && <Card className="space-y-2"><h3 className="text-sm font-bold text-slate-100">Alertas de búsqueda</h3>
         {searches.length === 0 && <p className="text-xs text-slate-500">Guardá una búsqueda en Explorar y te avisamos cuando se publique una fecha que coincida.</p>}
         {searches.map((s) => <div key={s.id} className="flex items-center justify-between text-sm text-slate-200"><span>{s.name}</span><Btn kind="ghost" aria-label={`Borrar alerta ${s.name}`} onClick={async () => { await act.run(() => api.deleteSearch(s.id)); reload(); }}>Borrar</Btn></div>)}</Card>}
+      <NotificationSettings isBar={isBar} />
       <Card className="space-y-2"><h3 className="text-sm font-bold text-slate-100">Ayuda</h3>
         <Btn kind="ghost" className="w-full" onClick={help.openTour}>Ver el tour otra vez</Btn>
         <Btn kind="ghost" className="w-full" onClick={help.openNovedades}>Ver novedades{help.unread > 0 ? ` (${help.unread})` : ''}</Btn></Card>

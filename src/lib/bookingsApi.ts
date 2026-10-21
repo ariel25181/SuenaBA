@@ -38,6 +38,7 @@ export interface PaymentInfo { status: 'held' | 'released' | 'refunded' | 'parti
 export interface EntityLite { id: string; name: string; photo: string | null; subtitle: string }
 export interface Fees { venueFeeBps: number; musicianFeeBps: number }
 
+export interface NotifPrefs { emailEnabled: boolean; pushEnabled: boolean; mutedKinds: string[] }
 export interface UserPrefs { audience: 'anfitrion' | 'musico' | 'publico' | null; tourVersion: number; whatsNewSeen: number }
 export interface PublicShow { bookingId: string; venueId: string; venueName: string; neighborhood: string; address: string; coverPhoto: string | null; musicianName: string; musicianFormat: string; genres: string[]; startsAt: string; endsAt: string; totalCount: number }
 export interface ShowFilters { neighborhoods?: string[]; genres?: string[]; from?: string; to?: string; limit?: number; offset?: number }
@@ -79,6 +80,7 @@ export const mapProfileRequest = (r: Row): ProfileRequest => ({ id: r.id, role: 
 export const mapEvent = (r: Row): BookingEvent => ({ id: Number(r.id), event: r.event, fromStatus: r.from_status ?? null, toStatus: r.to_status ?? null, at: r.at, meta: r.meta ?? {} });
 export const mapPayment = (r: Row): PaymentInfo => ({ status: r.status, chargedArs: num(r.charged_ars), cachetArs: num(r.cachet_ars), venueFeeArs: num(r.venue_fee_ars), refundedArs: num(r.refunded_ars), payoutArs: num(r.payout_ars), platformFeeArs: num(r.platform_fee_ars), provider: r.provider });
 
+export const mapNotifPrefs = (r: Row): NotifPrefs => ({ emailEnabled: r.email_enabled !== false, pushEnabled: r.push_enabled !== false, mutedKinds: r.muted_kinds ?? [] });
 export const mapPrefs = (r: Row): UserPrefs => ({ audience: r.audience ?? null, tourVersion: num(r.tour_version), whatsNewSeen: num(r.whats_new_seen) });
 export const mapShow = (r: Row): PublicShow => ({ bookingId: r.booking_id, venueId: r.venue_id, venueName: r.venue_name, neighborhood: r.neighborhood, address: r.address ?? '', coverPhoto: r.cover_photo ?? null,
   musicianName: r.musician_name, musicianFormat: r.musician_format, genres: r.genres ?? [], startsAt: r.starts_at, endsAt: r.ends_at, totalCount: num(r.total_count) });
@@ -152,6 +154,12 @@ export function createBookingsApi(client: RpcClient) {
       (await callRows('save_user_prefs', { p_audience: p.audience ?? null, p_tour_version: p.tourVersion ?? null, p_whats_new_seen: p.whatsNewSeen ?? null }, mapPrefs))[0],
     upcomingShows: (f: ShowFilters = {}) => callRows('upcoming_shows', { p_from: f.from ?? null, p_to: f.to ?? null, p_neighborhoods: f.neighborhoods?.length ? f.neighborhoods : null,
       p_genres: f.genres?.length ? f.genres : null, p_limit: f.limit ?? 20, p_offset: f.offset ?? 0 }, mapShow),
+    // Avisos por email y push
+    notificationPrefs: async (): Promise<NotifPrefs> => (await read(client.from('notification_prefs').select('*'), mapNotifPrefs))[0] ?? { emailEnabled: true, pushEnabled: true, mutedKinds: [] },
+    setNotificationPrefs: async (p: { email?: boolean; push?: boolean; mutedKinds?: string[] }) =>
+      (await callRows('set_notification_prefs', { p_email: p.email ?? null, p_push: p.push ?? null, p_muted_kinds: p.mutedKinds ?? null }, mapNotifPrefs))[0],
+    registerPush: (s: { endpoint: string; p256dh: string; auth: string; userAgent?: string }) => callScalar<string>('register_push_subscription', { p_endpoint: s.endpoint, p_p256dh: s.p256dh, p_auth: s.auth, p_user_agent: s.userAgent ?? null }),
+    removePush: (endpoint: string) => callScalar<boolean>('remove_push_subscription', { p_endpoint: endpoint }),
     // Detalle de reservas
     booking: async (id: string) => (await read(client.from('bookings').select('*').eq('id', id), mapBooking))[0] ?? null,
     bookingEvents: (bookingId: string) => read(client.from('booking_events').select('*').eq('booking_id', bookingId).order('id', { ascending: true }), mapEvent),

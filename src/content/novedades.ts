@@ -49,6 +49,8 @@ export const NOVEDADES: Novedad[] = [
     body: 'Los shows confirmados y pagos aparecen en la cartelera: cualquiera puede verlos, sin cuenta, y filtrarlos por barrio y género.' },
   { id: 15, date: '2026-10-21', tag: 'nuevo', title: 'Tour de bienvenida y novedades', audiences: TODOS, tab: 'cuenta',
     body: 'Un recorrido corto según cómo uses SuenaBA (anfitrión, músico o público) y esta sección para enterarte de cada función nueva. Podés repetir el tour cuando quieras.' },
+  { id: 16, date: '2026-10-22', tag: 'nuevo', title: 'Avisos por email y en tu celular', audiences: AMBOS, tab: 'cuenta',
+    body: 'Además de la bandeja, te avisamos por email y con notificaciones en este dispositivo cuando hay una solicitud, un pago o un mensaje. En Cuenta elegís qué recibir.' },
 ];
 
 /** Pestañas que existen para cada tipo de uso (para no ofrecer "Probar ahora" hacia algo que no está). */

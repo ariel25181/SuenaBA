@@ -10,7 +10,7 @@ pg.types.setTypeParser(1700, (v: string) => parseFloat(v));
 
 export const ADMIN_URL = process.env.TEST_DATABASE_URL || 'postgres://postgres:pw@localhost:5432/postgres';
 const ROOT = path.resolve(import.meta.dirname, '../..');
-const SQL_FILES = ['tests/db/00_supabase_stub.sql', 'supabase-schema.sql', 'supabase/migrations/20261019000000_reservas.sql', 'supabase/migrations/20261020000000_airbnb_extras.sql', 'supabase/migrations/20261021000000_tour_novedades.sql'];
+const SQL_FILES = ['tests/db/00_supabase_stub.sql', 'supabase-schema.sql', 'supabase/migrations/20261019000000_reservas.sql', 'supabase/migrations/20261020000000_airbnb_extras.sql', 'supabase/migrations/20261021000000_tour_novedades.sql', 'supabase/migrations/20261022000000_entrega_avisos.sql'];
 
 /** Crea una base limpia con el esquema real + migración y devuelve un Pool. */
 export async function createTestDb(name: string, poolSize = 30): Promise<pg.Pool> {
@@ -112,7 +112,15 @@ export function api(pool: pg.Pool) {
     requestProfile: (userId: string, p: { role: string; name: string; neighborhood?: string | null; address?: string | null; bio?: string; evidence?: string | null }, o?: CallOpts) =>
       one(userId, 'select * from public.request_profile($1,$2,$3,$4,$5,$6)', [p.role, p.name, p.neighborhood ?? null, p.address ?? null, p.bio ?? '', p.evidence ?? null], o),
     reviewRequest: (id: string, approve: boolean, note = '', o?: CallOpts) => asSystem(pool, async (c) => (await c.query('select * from public.admin_review_profile_request($1,$2,$3)', [id, approve, note])).rows[0], o),
-    claimPending: (limit = 1000) => asSystem(pool, async (c) => (await c.query('select id from public.claim_pending_notifications($1)', [limit])).rows.map((r) => r.id as string)),
+    claimPending: (limit = 1000, o?: CallOpts) => asSystem(pool, async (c) => (await c.query('select id from public.claim_pending_notifications($1)', [limit])).rows.map((r) => r.id as string), o),
+    claimRows: (limit = 50, o?: CallOpts) => asSystem(pool, async (c) => (await c.query('select * from public.claim_pending_notifications($1)', [limit])).rows, o),
+    completeDelivery: (id: string, ok: boolean, error: string | null = null, email = false, push = false, o?: CallOpts) =>
+      asSystem(pool, async (c) => (await c.query('select * from public.complete_notification_delivery($1,$2,$3,$4,$5)', [id, ok, error, email, push])).rows[0], o),
+    setNotifPrefs: (a: Actor | string, p: { email?: boolean | null; push?: boolean | null; muted?: string[] | null }, o?: CallOpts) =>
+      one(a, 'select * from public.set_notification_prefs($1,$2,$3)', [p.email ?? null, p.push ?? null, p.muted ?? null], o),
+    regPush: (a: Actor | string, endpoint: string, p256dh = 'p'.repeat(87), auth = 'a'.repeat(22), ua: string | null = 'jsdom', o?: CallOpts) =>
+      one(a, 'select public.register_push_subscription($1,$2,$3,$4) id', [endpoint, p256dh, auth, ua], o).then((r: any) => r.id as string),
+    rmPush: (a: Actor | string, endpoint: string, o?: CallOpts) => one(a, 'select public.remove_push_subscription($1) r', [endpoint], o).then((r: any) => r.r as boolean),
     savePrefs: (userId: string | null, p: { audience?: string | null; tour?: number | null; seen?: number | null }, o?: CallOpts) =>
       one(userId, 'select * from public.save_user_prefs($1,$2,$3)', [p.audience ?? null, p.tour ?? null, p.seen ?? null], o),
     shows: (f: Record<string, unknown> = {}, o?: CallOpts) => asUser(pool, null, async (c) => (await c.query(
@@ -149,7 +157,7 @@ export async function seedActors(pool: pg.Pool, nBars: number, nMus: number, pre
 }
 
 export async function resetData(pool: pg.Pool) {
-  await pool.query(`truncate public.user_prefs, public.notifications, public.favorites, public.saved_searches, public.profile_requests, public.messages, public.booking_reviews, public.payments, public.booking_events,
+  await pool.query(`truncate public.push_subscriptions, public.notification_prefs, public.user_prefs, public.notifications, public.favorites, public.saved_searches, public.profile_requests, public.messages, public.booking_reviews, public.payments, public.booking_events,
     public.bookings, public.listings, public.profiles cascade;
     delete from auth.users; delete from public.venues where id like 't-%' or id like 'sim-%'; delete from public.musicians where id like 't-%' or id like 'sim-%';
     update public.app_settings set venue_fee_bps = 0, musician_fee_bps = 0, max_pending_requests = 20, request_ttl_hours = 48, fund_ttl_hours = 48, review_window_days = 14, require_verification = false, superhost_min_shows = 5, superhost_min_rating = 4.7, superhost_max_cancel_pct = 2, superhost_min_response_pct = 90`);
