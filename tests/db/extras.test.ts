@@ -102,10 +102,11 @@ describe('Notificaciones', () => {
   it('cancelaciones: avisa solo a la otra parte; vencimientos: a ambas', async () => {
     const c = await confirmed(bar1, m1, 10);
     await A.cancel(bar1, c.bookingId);
-    assert.equal((await kinds(m1)).at(-1), 'booking_cancelled');
+    assert.ok((await kinds(m1)).includes('booking_cancelled'));
     assert.equal((await kinds(bar1)).includes('booking_cancelled'), false);
+    assert.ok((await kinds(bar1)).includes('payment_refund'));                                // el bar que cancela una reserva pagada recibe el aviso de reembolso
     const c2 = await confirmed(bar2, m2, 11); await A.cancel(m2, c2.bookingId);
-    assert.equal((await kinds(bar2)).at(-1), 'booking_cancelled');
+    assert.ok((await kinds(bar2)).includes('booking_cancelled'));
     assert.equal((await kinds(m2)).includes('booking_cancelled'), false);
     const l = await listing(bar3, 12); await A.request(m3, l.id);
     await A.expireStale({ now: plus(new Date(), 49 * H) });
@@ -403,5 +404,41 @@ describe('Concurrencia sobre topes', () => {
     const f = await Promise.allSettled(ls.filter(Boolean).map((l: any) => A.toggleFav(m2, 'listing', l.id)));
     assert.equal(f.filter((x) => x.status === 'rejected' && !(x.reason instanceof BizError)).length, 0);
     assert.ok((await A.q('select count(*)::int n from favorites where user_id = $1', [m2.userId]))[0].n <= 500);
+  });
+});
+
+describe('Concurrencia sobre restricciones de superposición', () => {
+  it('un bar que publica 12 fechas superpuestas a la vez obtiene 1 éxito y el resto "listing_overlap" (sin deadlocks)', async () => {
+    for (let round = 0; round < 5; round++) {
+      const s = day(10 + round * 2);
+      const res = await Promise.allSettled(Array.from({ length: 12 }, (_, k) => A.createListing(bar1, { starts: new Date(s.getTime() + k * 600_000), ends: new Date(s.getTime() + k * 600_000 + 3 * H), cachet: 1 } as any)));
+      const unexpected = res.filter((r) => r.status === 'rejected' && !(r.reason instanceof BizError));
+      assert.equal(unexpected.length, 0, JSON.stringify(unexpected.map((u: any) => u.reason?.message)));
+      assert.equal(res.filter((r) => r.status === 'fulfilled').length, 1);
+      assert.ok(res.every((r) => r.status === 'fulfilled' || (r.reason as BizError).message === 'listing_overlap'));
+    }
+  });
+  it('dos bares aceptando a la vez al mismo músico en horarios que se pisan: uno gana, el otro "musician_busy", sin deadlocks', async () => {
+    for (let round = 0; round < 12; round++) {
+      const s = day(10 + round * 2);
+      const la = await A.createListing(bar1, { starts: s, ends: new Date(s.getTime() + 3 * H), cachet: 1 } as any);
+      const lb = await A.createListing(bar2, { starts: new Date(s.getTime() + H), ends: new Date(s.getTime() + 4 * H), cachet: 1 } as any);
+      const ba = await A.request(m1, la.id), bb = await A.request(m1, lb.id);
+      const res = await Promise.allSettled([A.respond(bar1, ba.id, true), A.respond(bar2, bb.id, true)]);
+      const unexpected = res.filter((r) => r.status === 'rejected' && !(r.reason instanceof BizError));
+      assert.equal(unexpected.length, 0, JSON.stringify(unexpected.map((u: any) => u.reason?.message)));
+      assert.equal(res.filter((r) => r.status === 'fulfilled').length, 1, `ronda ${round}`);
+      assert.equal((await A.q(`select count(*)::int n from bookings where musician_id = $1 and status = 'aceptada' and starts_at between $2 and $3`, [m1.entityId, new Date(s.getTime() - H), new Date(s.getTime() + 5 * H)]))[0].n, 1);
+    }
+  });
+  it('reserva instantánea del mismo músico en dos fechas que se pisan, a la vez: una sola se concreta', async () => {
+    for (let round = 0; round < 8; round++) {
+      const s = day(40 + round * 2);
+      const la = await A.createListing(bar1, { starts: s, ends: new Date(s.getTime() + 3 * H), cachet: 1, mode: 'instant' } as any);
+      const lb = await A.createListing(bar2, { starts: new Date(s.getTime() + 2 * H), ends: new Date(s.getTime() + 5 * H), cachet: 1, mode: 'instant' } as any);
+      const res = await Promise.allSettled([A.request(m2, la.id), A.request(m2, lb.id)]);
+      assert.equal(res.filter((r) => r.status === 'rejected' && !(r.reason instanceof BizError)).length, 0, JSON.stringify(res.filter((r) => r.status === 'rejected').map((r: any) => r.reason?.message)));
+      assert.equal(res.filter((r) => r.status === 'fulfilled').length, 1);
+    }
   });
 });

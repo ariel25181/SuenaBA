@@ -21,13 +21,13 @@ before(async () => { pool = await createTestDb(DB, 30); A = api(pool); });
 after(async () => { await dropTestDb(pool, DB); });
 
 interface Fees { v: number; m: number }
-async function scenario(seed: number, fees: Fees) {
+async function scenario(seed: number, fees: Fees, mp = false) {
   const R = rng(seed);
   const pick = <T,>(xs: T[]): T => xs[Math.floor(R() * xs.length)];
   const chance = (p: number) => R() < p;
 
   await resetData(pool);
-  await A.q('update app_settings set venue_fee_bps = $1, musician_fee_bps = $2', [fees.v, fees.m]);
+  await A.q('update app_settings set venue_fee_bps = $1, musician_fee_bps = $2, payment_mode = $3', [fees.v, fees.m, mp ? 'mercadopago' : 'simulado']);
   const { bars, mus } = await seedActors(pool, 10, 10, 'sim');
   // Prueba de sabotaje (solo local): MUTATE=overlap quita la protección contra shows superpuestos
   if (process.env.MUTATE === 'overlap') await A.q('alter table bookings drop constraint if exists bookings_musician_no_overlap');
@@ -43,6 +43,7 @@ async function scenario(seed: number, fees: Fees) {
     }
   };
   const all = (xs: Promise<unknown>[]) => Promise.all(xs);
+  await all(mus.map((m, i) => attempt('alias', () => A.setAlias(m, i % 4 === 3 ? null : `musico.sim${i}`))));
 
   // ---- Grilla de horarios: tarde / noche / trasnoche (solapa con noche) en 10 días
   const midnight = new Date(); midnight.setUTCHours(0, 0, 0, 0);
@@ -110,7 +111,20 @@ async function scenario(seed: number, fees: Fees) {
     await all(accepted.flatMap((b) => {
       const bar = barBy.get(b.venue_id)!, m = musBy.get(b.musician_id)!, r = R();
       const tasks: Promise<unknown>[] = [];
-      if (r < 0.85) { tasks.push(attempt('fund', () => A.fund(bar, b.id))); if (chance(0.3)) tasks.push(attempt('fund', () => A.fund(bar, b.id))); }
+      if (mp && r < 0.9) {
+        // Mercado Pago: el bar inicia el pago (a veces dos veces a la vez) y llegan avisos duplicados, desordenados o con monto equivocado
+        tasks.push((async () => {
+          const [i1, i2] = await Promise.all([attempt('begin_payment', () => A.beginPay(bar, b.id)), chance(0.3) ? attempt('begin_payment', () => A.beginPay(bar, b.id)) : Promise.resolve(undefined)]);
+          const i = i1 ?? i2; if (!i) return;
+          const pid = String(100000 + Math.floor(R() * 900000)), amt = Number(i.amount_ars), q = R();
+          if (q < 0.06) { await attempt('webhook', () => A.confirmIntent(i.id, pid, amt + 1)); return; }                       // monto equivocado
+          if (q < 0.12) { await attempt('webhook', () => A.confirmIntent(i.id, pid, amt, 'ARS', 'rejected')); return; }         // rechazado
+          const hits = 1 + Math.floor(R() * 3);
+          await all(Array.from({ length: hits }, () => attempt('webhook', () => A.confirmIntent(i.id, pid, amt))));            // aviso repetido
+          if (chance(0.05)) await attempt('webhook_double', () => A.confirmIntent(i.id, pid + '9', amt));                       // segundo pago
+        })());
+        if (chance(0.1)) tasks.push(attempt('cancel_by_bar', () => A.cancel(bar, b.id)));                                       // cancela mientras paga
+      } else if (!mp && r < 0.85) { tasks.push(attempt('fund', () => A.fund(bar, b.id))); if (chance(0.3)) tasks.push(attempt('fund', () => A.fund(bar, b.id))); }
       if (r > 0.8 && r < 0.9) tasks.push(attempt('cancel_by_musician', () => A.cancel(m, b.id)));
       if (chance(0.3)) tasks.push(attempt('message', () => A.message(m, b.id, 'Llevamos nuestro bajo')));
       return tasks;
@@ -118,7 +132,7 @@ async function scenario(seed: number, fees: Fees) {
 
     // ================= Fase 4b: vencimientos 3 días más tarde (solicitudes y pagos que nadie atendió)
     const t3 = new Date(Date.now() + 3 * D);
-    await all([attempt('expire_job', () => A.expireStale({ now: t3 })), attempt('expire_job', () => A.expireStale({ now: t3 }))]);
+    await all([attempt('expire_job', () => A.expireStale({ now: t3 })), attempt('expire_job', () => A.expireStale({ now: t3 })), attempt('expire_intents', () => A.expireIntents({ now: t3 }))]);
   }
 
   // ================= Fase 5: cancelaciones de reservas pagadas a distintas distancias del show
@@ -170,6 +184,18 @@ async function scenario(seed: number, fees: Fees) {
   const T3 = new Date(T1.getTime() + 16 * D);
   await all([attempt('publish_job', () => A.publishDue({ now: T3 })), attempt('publish_job', () => A.publishDue({ now: T3 }))]);
 
+  if (mp) {
+    // workers de reembolsos en paralelo: algunos intentos fallan una vez y se reintentan
+    let guard = 0;
+    for (let round = 0; round < 6 && guard < 6; round++, guard++) {
+      const clockNow = new Date(T3.getTime() + (round + 1) * 40 * 60_000);   // después de todo lo simulado
+      const batches = await Promise.all([A.claimRefunds(30, { now: clockNow }), A.claimRefunds(30, { now: clockNow })]);
+      const rows = batches.flat(); if (new Set(rows.map((r) => r.id)).size !== rows.length) unexpected.push('un reembolso se reclamó dos veces');
+      await all(rows.map((r) => attempt('refund_done', () => A.completeRefund(r.id, round > 0 || chance(0.7), 'rf-' + r.id.slice(0, 8), 'mp 500', { now: clockNow }))));
+    }
+    const pendingPayouts = await A.q(`select id from payouts where status = 'pendiente' and alias_snapshot is not null`);
+    await all(pendingPayouts.map((p) => attempt('payout_paid', () => A.markPaid(p.id, 'transf-' + p.id.slice(0, 6)))));
+  }
   await all([...bars, ...mus].map((x) => attempt('earnings', () => A.earnings(x))));
   // dos workers vacían la cola en lotes (máx. 500 por lote) sin entregar nada dos veces
   const claimed: string[] = [];
@@ -190,20 +216,24 @@ async function scenario(seed: number, fees: Fees) {
   const late = (await A.q(`select coalesce(sum(late_cancellations),0)::int n from profiles`))[0].n;
   const notifCount = (await A.q('select count(*)::int n from notifications'))[0].n, alerts = (await A.q(`select count(*)::int n from notifications where kind = 'search_match'`))[0].n;
   const favs = (await A.q('select count(*)::int n from favorites'))[0].n;
-  return { notifCount, alerts, favs, ok, biz, unexpected, violations, byStatus, money, reviews, events, late, listings: listingIds.length };
+  const mpStats = (await A.q(`select (select count(*)::int from payment_intents) intents, (select count(*)::int from payment_intents where status = 'aprobado') aprobadas,
+    (select count(*)::int from payment_intents where status in ('reembolsar','reembolsado','discrepancia')) devueltas, (select count(*)::int from payment_refunds) reembolsos,
+    (select count(*)::int from payment_refunds where status = 'pendiente') reembolsos_pendientes, (select count(*)::int from payouts) pagos_musicos, (select count(*)::int from payouts where status = 'pagado') pagados`))[0];
+  return { mpStats, notifCount, alerts, favs, ok, biz, unexpected, violations, byStatus, money, reviews, events, late, listings: listingIds.length };
 }
 
-const CONFIGS: [number, Fees][] = [[1, { v: 0, m: 0 }], [2, { v: 300, m: 700 }], [3, { v: 500, m: 500 }], [4, { v: 0, m: 1000 }]];
+const CONFIGS: [number, Fees, boolean][] = [[1, { v: 0, m: 0 }, false], [2, { v: 300, m: 700 }, true], [3, { v: 500, m: 500 }, false], [4, { v: 0, m: 1000 }, true]];
 describe('Simulación concurrente: 10 bares × 10 músicos', () => {
-  for (const [seed, fees] of CONFIGS) {
-    it(`semilla ${seed} · comisión bar ${fees.v / 100}% / músico ${fees.m / 100}%`, { timeout: 180_000 }, async () => {
-      const r = await scenario(seed, fees);
+  for (const [seed, fees, mp] of CONFIGS) {
+    it(`semilla ${seed} · ${mp ? 'Mercado Pago' : 'pago simulado'} · comisión bar ${fees.v / 100}% / músico ${fees.m / 100}%`, { timeout: 180_000 }, async () => {
+      const r = await scenario(seed, fees, mp);
       const totalBiz = Object.values(r.biz).reduce((a, b) => a + b, 0), totalOk = Object.values(r.ok).reduce((a, b) => a + b, 0);
       console.log(`\n[semilla ${seed}] ${totalOk} operaciones OK, ${totalBiz} rechazos de negocio esperados, ${r.listings} fechas, ${r.events} eventos de auditoría`);
       console.log('  reservas por estado:', JSON.stringify(r.byStatus));
       console.log('  dinero (ARS):', JSON.stringify(r.money), '| reseñas:', JSON.stringify(r.reviews), '| cancelaciones tardías de músicos:', r.late);
       const top = Object.entries(r.biz).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k}=${v}`).join(', ');
       console.log('  rechazos más frecuentes:', top);
+      if (mp) console.log('  Mercado Pago:', JSON.stringify(r.mpStats));
       console.log(`  notificaciones: ${r.notifCount} (alertas de búsqueda: ${r.alerts}) · favoritos: ${r.favs}`);
 
       assert.deepEqual(r.unexpected, [], 'errores inesperados (deadlocks, violaciones de constraints, etc.):\n' + r.unexpected.slice(0, 10).join('\n'));
@@ -214,6 +244,7 @@ describe('Simulación concurrente: 10 bares × 10 músicos', () => {
       for (const st of ['realizada', 'cancelada', 'rechazada', 'expirada']) assert.ok((r.byStatus[st] ?? 0) > 0, `ninguna reserva terminó en ${st}`);
       assert.ok(r.reviews.publicadas > 0);
       assert.ok(r.alerts > 0, 'ninguna alerta de búsqueda se disparó');
+      if (mp) { assert.ok(r.mpStats.aprobadas > 0 && r.mpStats.reembolsos > 0 && r.mpStats.pagos_musicos > 0, 'no se ejercitó Mercado Pago: ' + JSON.stringify(r.mpStats)); assert.equal(r.mpStats.reembolsos_pendientes, 0, 'quedaron reembolsos sin procesar'); }
       assert.ok((r.ok['search'] ?? 0) > 0 && (r.ok['fav'] ?? 0) > 0);
       const m = r.money;
       assert.equal(m.cobrado, m.reembolsado + m.pagado_musicos + m.plataforma + m.retenido, 'el dinero total no cuadra');

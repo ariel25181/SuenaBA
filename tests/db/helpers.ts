@@ -10,7 +10,7 @@ pg.types.setTypeParser(1700, (v: string) => parseFloat(v));
 
 export const ADMIN_URL = process.env.TEST_DATABASE_URL || 'postgres://postgres:pw@localhost:5432/postgres';
 const ROOT = path.resolve(import.meta.dirname, '../..');
-const SQL_FILES = ['tests/db/00_supabase_stub.sql', 'supabase-schema.sql', 'supabase/migrations/20261019000000_reservas.sql', 'supabase/migrations/20261020000000_airbnb_extras.sql', 'supabase/migrations/20261021000000_tour_novedades.sql', 'supabase/migrations/20261022000000_entrega_avisos.sql'];
+const SQL_FILES = ['tests/db/00_supabase_stub.sql', 'supabase-schema.sql', 'supabase/migrations/20261019000000_reservas.sql', 'supabase/migrations/20261020000000_airbnb_extras.sql', 'supabase/migrations/20261021000000_tour_novedades.sql', 'supabase/migrations/20261022000000_entrega_avisos.sql', 'supabase/migrations/20261023000000_mercado_pago.sql'];
 
 /** Crea una base limpia con el esquema real + migración y devuelve un Pool. */
 export async function createTestDb(name: string, poolSize = 30): Promise<pg.Pool> {
@@ -126,6 +126,16 @@ export function api(pool: pg.Pool) {
     shows: (f: Record<string, unknown> = {}, o?: CallOpts) => asUser(pool, null, async (c) => (await c.query(
       'select * from public.upcoming_shows($1,$2,$3,$4,coalesce($5,20),coalesce($6,0))',
       [f.from ?? null, f.to ?? null, f.neighborhoods ?? null, f.genres ?? null, f.limit ?? null, f.offset ?? null])).rows, { role: 'anon', ...o }),
+    beginPay: (a: Actor, id: string, o?: CallOpts) => one(a, 'select * from public.begin_payment($1)', [id], o),
+    attachPref: (id: string, pref: string, point: string, o?: CallOpts) => asSystem(pool, async (c) => (await c.query('select * from public.attach_preference($1,$2,$3)', [id, pref, point])).rows[0], o),
+    confirmIntent: (id: string, payment: string, amount: number | string, currency = 'ARS', status = 'approved', o?: CallOpts) =>
+      asSystem(pool, async (c) => (await c.query('select * from public.confirm_payment_intent($1,$2,$3,$4,$5)', [id, payment, amount, currency, status])).rows[0], o),
+    expireIntents: (o?: CallOpts) => asSystem(pool, async (c) => (await c.query('select public.expire_stale_intents() n')).rows[0].n as number, o),
+    claimRefunds: (limit = 20, o?: CallOpts) => asSystem(pool, async (c) => (await c.query('select * from public.claim_pending_refunds($1)', [limit])).rows, o),
+    completeRefund: (id: string, ok: boolean, mpRefund: string | null = null, err: string | null = null, o?: CallOpts) =>
+      asSystem(pool, async (c) => (await c.query('select * from public.complete_refund($1,$2,$3,$4)', [id, ok, mpRefund, err])).rows[0], o),
+    setAlias: (a: Actor, alias: string | null, o?: CallOpts) => one(a, 'select public.set_payout_alias($1) r', [alias], o),
+    markPaid: (id: string, ref: string, o?: CallOpts) => asSystem(pool, async (c) => (await c.query('select * from public.admin_mark_payout_paid($1,$2)', [id, ref])).rows[0], o),
     q: async <R = any>(sql: string, params: unknown[] = []) => (await pool.query(sql, params)).rows as R[],
   };
 }
@@ -157,10 +167,10 @@ export async function seedActors(pool: pg.Pool, nBars: number, nMus: number, pre
 }
 
 export async function resetData(pool: pg.Pool) {
-  await pool.query(`truncate public.push_subscriptions, public.notification_prefs, public.user_prefs, public.notifications, public.favorites, public.saved_searches, public.profile_requests, public.messages, public.booking_reviews, public.payments, public.booking_events,
+  await pool.query(`truncate public.payouts, public.payment_refunds, public.payment_intents, public.push_subscriptions, public.notification_prefs, public.user_prefs, public.notifications, public.favorites, public.saved_searches, public.profile_requests, public.messages, public.booking_reviews, public.payments, public.booking_events,
     public.bookings, public.listings, public.profiles cascade;
     delete from auth.users; delete from public.venues where id like 't-%' or id like 'sim-%'; delete from public.musicians where id like 't-%' or id like 'sim-%';
-    update public.app_settings set venue_fee_bps = 0, musician_fee_bps = 0, max_pending_requests = 20, request_ttl_hours = 48, fund_ttl_hours = 48, review_window_days = 14, require_verification = false, superhost_min_shows = 5, superhost_min_rating = 4.7, superhost_max_cancel_pct = 2, superhost_min_response_pct = 90`);
+    update public.app_settings set venue_fee_bps = 0, musician_fee_bps = 0, max_pending_requests = 20, request_ttl_hours = 48, fund_ttl_hours = 48, review_window_days = 14, require_verification = false, payment_mode = 'simulado', superhost_min_shows = 5, superhost_min_rating = 4.7, superhost_max_cancel_pct = 2, superhost_min_response_pct = 90`);
 }
 
 const ALLOWED: Record<string, string[]> = {
@@ -257,7 +267,7 @@ export async function checkInvariants(pool: pg.Pool, opts: { singlePublishedAllo
 
   // 11. Notificaciones: cantidad exacta por evento, solo a participantes, tipos válidos
   const KINDS = ['booking_requested','booking_instant','booking_accepted','booking_rejected','booking_listing_taken','booking_listing_cancelled','booking_funded',
-    'booking_cancelled','booking_expired','review_invite','booking_disputed','dispute_resolved','review_pending','message','search_match','profile_approved','profile_rejected'];
+    'booking_cancelled','booking_expired','review_invite','booking_disputed','dispute_resolved','review_pending','message','search_match','profile_approved','profile_rejected','payment_refund','payout_paid'];
   await expectEmpty('11a tipo de notificación desconocido', `select id, kind from notifications where kind <> all('{${KINDS.join(',')}}')`);
   await expectEmpty('11b notificación de reserva a alguien que no participa',
     `select n.id from notifications n join bookings b on b.id = n.booking_id
@@ -267,7 +277,7 @@ export async function checkInvariants(pool: pg.Pool, opts: { singlePublishedAllo
       when 'expirada' then 2 when 'realizada' then 2 when 'disputa_resuelta' then 2
       when 'solicitada' then 1 when 'aceptada' then 1 when 'rechazada' then 1 when 'confirmada' then 1 when 'disputa' then 1 when 'resena' then 1 else 0 end), 0)::int n
     from booking_events e`))[0].n;
-  const got = (await q(`select count(*)::int n from notifications where booking_id is not null and kind <> 'message'`))[0].n;
+  const got = (await q(`select count(*)::int n from notifications where booking_id is not null and kind not in ('message','payment_refund','payout_paid')`))[0].n;
   if (exp !== got) bad.push(`11c notificaciones de reservas: esperadas ${exp} según auditoría, hay ${got}`);
   const msgs = (await q(`select (select count(*) from messages)::int m, (select count(*) from notifications where kind = 'message')::int n`))[0];
   if (msgs.m !== msgs.n) bad.push(`11d mensajes ${msgs.m} ≠ notificaciones de mensaje ${msgs.n}`);
@@ -276,5 +286,22 @@ export async function checkInvariants(pool: pg.Pool, opts: { singlePublishedAllo
     `select musician_id from bookings where status = 'solicitada' group by 1 having count(*) > (select max_pending_requests from app_settings)`);
   await expectEmpty('12b más de 10 búsquedas guardadas', `select user_id from saved_searches group by 1 having count(*) > 10`);
   await expectEmpty('12c más de 500 favoritos', `select user_id from favorites group by 1 having count(*) > 500`);
+
+  // 13. Mercado Pago: una sola aprobación por reserva, dinero de reembolsos y pagos a músicos consistentes
+  await expectEmpty('13a más de un pago aprobado para la misma reserva', `select booking_id from payment_intents where status = 'aprobado' group by 1 having count(*) > 1`);
+  await expectEmpty('13b pago de Mercado Pago sin intención aprobada del mismo monto',
+    `select p.id from payments p where p.provider = 'mercadopago' and not exists
+       (select 1 from payment_intents i where i.booking_id = p.booking_id and i.status = 'aprobado' and i.mp_payment_id = p.provider_ref and i.amount_ars = p.charged_ars)`);
+  await expectEmpty('13c reembolsos encolados ≠ lo reembolsado en el pago',
+    `select p.id from payments p where p.provider = 'mercadopago' and p.status <> 'held'
+       and p.refunded_ars <> coalesce((select sum(r.amount) from payment_refunds r where r.mp_payment_id = p.provider_ref and r.reason in ('cancelacion','disputa')), 0)`);
+  await expectEmpty('13d pagos a músicos ≠ lo liquidado',
+    `select p.id from payments p where p.status <> 'held' and p.payout_ars <> coalesce((select sum(o.amount_ars) from payouts o where o.booking_id = p.booking_id), 0)`);
+  await expectEmpty('13e pago a músico sin liquidación', `select o.id from payouts o left join payments p on p.booking_id = o.booking_id where p.id is null or p.status = 'held'`);
+  await expectEmpty('13f pago tardío o con discrepancia sin su reembolso',
+    `select i.id from payment_intents i where i.status in ('reembolsar','discrepancia') and not exists
+       (select 1 from payment_refunds r where r.mp_payment_id = i.mp_payment_id and r.reason in ('pago_tardio','discrepancia'))`);
+  await expectEmpty('13g reembolso mayor a lo cobrado',
+    `select r.id from payment_refunds r join payments p on p.provider_ref = r.mp_payment_id where r.amount > p.charged_ars`);
   return bad;
 }

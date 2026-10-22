@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useSession } from '../../context/SessionContext.tsx';
 import type { Booking, EntityLite, Profile } from '../../lib/bookingsApi.ts';
 import { STATUS_LABEL, hoursUntil, pricePreview, refundPct, settleAmounts, POLICY_LABEL, POLICY_RULES } from '../../domain/bookingRules.ts';
 import { Banner, Btn, Card, Empty, Field, Pill, Sheet, Stars, ars, fmtDateTime, fmtShort, inputCls, useAction, useLoad } from './ui.tsx';
+import { goToCheckout, pollConfig, type PaymentReturn } from '../../lib/paymentRedirect.ts';
 
 const tone = (s: string) => (s === 'confirmada' || s === 'realizada' ? 'green' : s === 'solicitada' || s === 'aceptada' ? 'amber' : 'red') as 'green' | 'amber' | 'red';
 
@@ -57,7 +58,7 @@ const CRITERIA = {
   musico: [['soundQuality', 'Calidad de sonido'], ['paymentReliability', 'Cumplimiento de pago'], ['hospitality', 'Hospitalidad'], ['respect', 'Respeto']],
 } as const;
 
-export const BookingSheet: React.FC<{ bookingId: string; profile: Profile; onClose: () => void; onChanged: () => void }> = ({ bookingId, profile, onClose, onChanged }) => {
+export const BookingSheet: React.FC<{ bookingId: string; profile: Profile; onClose: () => void; onChanged: () => void; returning?: PaymentReturn }> = ({ bookingId, profile, onClose, onChanged, returning }) => {
   const { api } = useSession();
   const act = useAction();
   const [confirm, setConfirm] = useState<null | 'cancel' | 'reject' | 'report'>(null);
@@ -65,16 +66,28 @@ export const BookingSheet: React.FC<{ bookingId: string; profile: Profile; onClo
   const { data, loading, reload } = useLoad(async () => {
     const b = await api.booking(bookingId);
     if (!b) return null;
-    const [events, payment, reviews, messages, c] = await Promise.all([api.bookingEvents(b.id), api.bookingPayment(b.id), api.bookingReviews(b.id), api.messages(b.id), counterparts(api, [b])]);
-    return { b, events, payment, reviews, messages, c };
+    const [events, payment, reviews, messages, c, fees] = await Promise.all([api.bookingEvents(b.id), api.bookingPayment(b.id), api.bookingReviews(b.id), api.messages(b.id), counterparts(api, [b]), api.fees()]);
+    return { b, events, payment, reviews, messages, c, fees };
   }, [bookingId]);
+
+  // Al volver de Mercado Pago el aviso puede demorar unos segundos: consultamos hasta ver la reserva confirmada.
+  const [polls, setPolls] = useState(0);
+  const waiting = returning?.result === 'ok' && returning.bookingId === bookingId && !!data && data.b.status === 'aceptada' && polls < pollConfig.max;
+  useEffect(() => {
+    if (!waiting) return;
+    const t = setTimeout(() => { setPolls((n) => n + 1); reload(); onChanged(); }, pollConfig.ms);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waiting, polls]);
   const after = () => { reload(); onChanged(); setConfirm(null); setReason(''); };
   if (loading && !data) return <Sheet title="Reserva" onClose={onClose}><Empty>Cargando…</Empty></Sheet>;
   if (!data) return <Sheet title="Reserva" onClose={onClose}><Banner kind="error">No encontramos esa reserva.</Banner></Sheet>;
-  const { b, events, payment, reviews, messages, c } = data;
+  const { b, events, payment, reviews, messages, c, fees } = data;
   const isBar = profile.role === 'bar', name = otherName(b, profile, c), now = new Date();
   const started = new Date(b.startsAt) <= now, ended = new Date(b.endsAt) <= now, hrs = hoursUntil(b.startsAt);
-  const price = pricePreview(b.cachetArs, 0, 0);
+  const price = pricePreview(b.cachetArs, fees.venueFeeBps, fees.musicianFeeBps);
+  const isReturn = returning?.bookingId === b.id ? returning.result : null;
+  const payWithMp = async () => { const r = await act.run(() => api.startPayment(b.id)); if (!r) return; if (r.status === 'aprobado' || !r.initPoint) after(); else goToCheckout(r.initPoint); };
   const myReview = reviews.find((r) => r.authorRole === profile.role);
   const chatOpen = !['rechazada', 'expirada'].includes(b.status);
   const send = async () => { if (await act.run(() => api.sendMessage(b.id, msg))) { setMsg(''); reload(); } };
@@ -96,6 +109,10 @@ export const BookingSheet: React.FC<{ bookingId: string; profile: Profile; onClo
         <p>{isBar ? `Total cobrado: ${ars(payment.chargedArs)}${payment.venueFeeArs ? ` (incluye comisión ${ars(payment.venueFeeArs)})` : ' (sin comisión)'}` : `Cachet a cobrar: ${ars(payment.cachetArs)}`}</p>
         {payment.status !== 'held' && <p>{isBar ? `Reembolsado: ${ars(payment.refundedArs)}` : `Te pagaron: ${ars(payment.payoutArs)}`}</p>}
       </Card>}
+      {isReturn === 'ok' && b.status === 'aceptada' && <Banner kind="info">Estamos confirmando tu pago… Esto puede tardar unos segundos.</Banner>}
+      {isReturn === 'ok' && b.status === 'confirmada' && <Banner kind="ok">¡Pago confirmado! La fecha quedó reservada.</Banner>}
+      {isReturn === 'error' && b.status === 'aceptada' && <Banner kind="error">El pago no se completó. Podés intentarlo de nuevo.</Banner>}
+      {isReturn === 'pendiente' && b.status === 'aceptada' && <Banner kind="info">Tu pago está pendiente de acreditación. Te avisamos apenas se confirme.</Banner>}
       {b.status === 'aceptada' && b.fundBy && <Banner kind="info">{isBar ? `Pagá antes del ${fmtDateTime(b.fundBy)} para confirmar la fecha.` : 'El bar tiene que pagar para confirmar. Te avisamos cuando lo haga.'}</Banner>}
       {act.error && <Banner kind="error">{act.error}</Banner>}
       {act.ok && <Banner kind="ok">{act.ok}</Banner>}
@@ -103,7 +120,8 @@ export const BookingSheet: React.FC<{ bookingId: string; profile: Profile; onClo
       <div className="space-y-2">
         {isBar && b.status === 'solicitada' && confirm !== 'reject' && <div className="flex gap-2"><Btn className="flex-1" disabled={act.busy} onClick={async () => { if (await act.run(() => api.respond(b.id, true), 'Solicitud aceptada.')) after(); }}>Aceptar solicitud</Btn><Btn kind="ghost" onClick={() => setConfirm('reject')}>Rechazar</Btn></div>}
         {isBar && b.status === 'solicitada' && confirm === 'reject' && <Card className="space-y-2"><Field label="Motivo (opcional)"><input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} /></Field><div className="flex gap-2"><Btn kind="danger" disabled={act.busy} onClick={async () => { if (await act.run(() => api.respond(b.id, false, reason), 'Solicitud rechazada.')) after(); }}>Confirmar rechazo</Btn><Btn kind="ghost" onClick={() => setConfirm(null)}>Volver</Btn></div></Card>}
-        {isBar && b.status === 'aceptada' && <Btn className="w-full" disabled={act.busy} onClick={async () => { if (await act.run(() => api.fund(b.id), 'Pago retenido: la fecha quedó confirmada.')) after(); }}>Pagar y confirmar ({ars(price.barPays)}+comisión)</Btn>}
+        {isBar && b.status === 'aceptada' && fees.paymentMode === 'simulado' && <Btn className="w-full" disabled={act.busy} onClick={async () => { if (await act.run(() => api.fund(b.id), 'Pago retenido: la fecha quedó confirmada.')) after(); }}>Pagar y confirmar ({ars(price.barPays)})</Btn>}
+        {isBar && b.status === 'aceptada' && fees.paymentMode === 'mercadopago' && <div className="space-y-1"><Btn className="w-full" disabled={act.busy} onClick={payWithMp}>Pagar con Mercado Pago ({ars(price.barPays)})</Btn><p className="text-[11px] text-slate-500">Te llevamos a Mercado Pago. Al volver confirmamos tu pago automáticamente; el dinero queda retenido hasta el show.</p></div>}
         {['solicitada', 'aceptada', 'confirmada'].includes(b.status) && !started && confirm !== 'cancel' && <Btn kind="ghost" className="w-full" onClick={() => setConfirm('cancel')}>Cancelar reserva</Btn>}
         {confirm === 'cancel' && <Card className="space-y-2"><p className="text-sm text-slate-200">{refundNote}</p><Field label="Motivo (opcional)"><input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} /></Field><div className="flex gap-2"><Btn kind="danger" disabled={act.busy} onClick={async () => { if (await act.run(() => api.cancel(b.id, reason), 'Reserva cancelada.')) after(); }}>Sí, cancelar</Btn><Btn kind="ghost" onClick={() => setConfirm(null)}>Volver</Btn></div></Card>}
         {b.status === 'confirmada' && ended && !b.disputedAt && <Btn className="w-full" disabled={act.busy} onClick={async () => { if (await act.run(() => api.complete(b.id), 'Show realizado. El pago fue liberado.')) after(); }}>Marcar show como realizado</Btn>}

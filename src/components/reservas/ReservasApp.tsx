@@ -10,6 +10,7 @@ import { BookingSheet, BookingsView } from './Bookings.tsx';
 import { AccountView, FavoritesView, HostPanel, NotificationsView } from './More.tsx';
 import { AudiencePicker, NovedadesSheet, TourSheet } from './Welcome.tsx';
 import { PublicHome } from './PublicHome.tsx';
+import { clearPaymentReturn, readPaymentReturn, type PaymentReturn } from '../../lib/paymentRedirect.ts';
 
 type Tab = Exclude<ReservasTab, 'cartelera'>;
 
@@ -21,12 +22,16 @@ const Home: React.FC<{ profile: Profile; requestedTab: { tab: ReservasTab; n: nu
     : [['explorar', 'Explorar'], ['reservas', 'Reservas'], ['favoritos', 'Favoritos'], ['avisos', 'Avisos'], ['cuenta', 'Cuenta']];
   const [tab, setTab] = useState<Tab>(tabs[0][0]);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [returning, setReturning] = useState<PaymentReturn>(null);
   const [key, setKey] = useState(0);
   const [unread, setUnread] = useState(0);
   const bump = useCallback(() => setKey((k) => k + 1), []);
 
   // Pedido de cambio de pestaña desde "Novedades" o el tour (solo si existe para este perfil)
   useEffect(() => { if (requestedTab && tabs.some(([id]) => id === requestedTab.tab)) setTab(requestedTab.tab as Tab); /* eslint-disable-next-line */ }, [requestedTab?.n]);
+
+  // Vuelta del checkout de Mercado Pago (?pago=ok&reserva=...): abre la reserva y espera la confirmación
+  useEffect(() => { const r = readPaymentReturn(); if (r) { setReturning(r); setTab('reservas'); setOpenId(r.bookingId); clearPaymentReturn(); } }, []);
 
   const loadUnread = useCallback(() => { api.notifications(100).then((n) => setUnread(n.filter((x) => !x.readAt).length)).catch(() => {}); }, [api]);
   useEffect(() => { loadUnread(); }, [loadUnread, key]);
@@ -48,7 +53,7 @@ const Home: React.FC<{ profile: Profile; requestedTab: { tab: ReservasTab; n: nu
       {tab === 'favoritos' && <FavoritesView profile={profile} />}
       {tab === 'avisos' && <NotificationsView refreshKey={key} onChanged={bump} onOpenBooking={(id) => { setTab('reservas'); setOpenId(id); }} />}
       {tab === 'cuenta' && <AccountView profile={profile} />}
-      {openId && <BookingSheet bookingId={openId} profile={profile} onClose={() => setOpenId(null)} onChanged={bump} />}
+      {openId && <BookingSheet bookingId={openId} profile={profile} onClose={() => setOpenId(null)} onChanged={bump} returning={returning} />}
     </div>
   );
 };

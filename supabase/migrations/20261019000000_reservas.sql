@@ -44,6 +44,7 @@ create table if not exists public.app_settings (
   fund_ttl_hours integer not null default 48,
   review_window_days integer not null default 14,
   max_pending_requests integer not null default 20,
+  payment_mode text not null default 'simulado' check (payment_mode in ('simulado','mercadopago')),   -- cómo se cobra
   require_verification boolean not null default false,        -- exigir perfil verificado para publicar/reservar
   superhost_min_shows integer not null default 5,
   superhost_min_rating numeric not null default 4.7,
@@ -207,7 +208,7 @@ revoke all on public.venues, public.musicians, public.open_calls, public.musicia
   public.live_shows, public.reviews from anon, authenticated;
 grant select on public.venues, public.musicians, public.open_calls, public.musician_availabilities,
   public.live_shows, public.reviews to anon, authenticated;
-grant select (venue_fee_bps, musician_fee_bps) on public.app_settings to anon, authenticated;
+grant select (venue_fee_bps, musician_fee_bps, payment_mode) on public.app_settings to anon, authenticated;
 grant select on public.listings, public.booking_reviews to anon, authenticated;
 grant select on public.profiles, public.bookings, public.payments, public.messages, public.booking_events to authenticated;
 
@@ -326,6 +327,8 @@ create or replace function public._accept(b public.bookings) returns public.book
 language plpgsql security definer set search_path = public, pg_temp as $$
 declare s public.app_settings; l public.listings; r public.bookings; rid uuid;
 begin
+  -- Mismo motivo: dos aceptaciones simultáneas del mismo músico en horarios que se pisan chocan en la restricción de exclusión.
+  perform pg_advisory_xact_lock(hashtextextended('mus:' || b.musician_id, 0));
   select * into s from public.app_settings;
   select * into l from public.listings where id = b.listing_id;
   update public.listings set status = 'reservada' where id = l.id;
@@ -361,7 +364,12 @@ begin
 end $$;
 
 -- Liquida el pago de una reserva: p_pct = % de reembolso al bar (0 = se paga todo al músico)
-create or replace function public._settle(b public.bookings, p_pct integer) returns void
+-- Gancho posterior a la liquidación (reembolsos reales y pagos a músicos). Lo redefine la migración de Mercado Pago.
+create or replace function public._after_settle(p_payment_id uuid, p_reason text) returns void
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin null; end $$;
+
+create or replace function public._settle(b public.bookings, p_pct integer, p_reason text default 'cancelacion') returns void
 language plpgsql security definer set search_path = public, pg_temp as $$
 declare pay public.payments; a record;
 begin
@@ -373,6 +381,7 @@ begin
     status = case when p_pct = 0 then 'released' when a.refunded = pay.charged_ars then 'refunded' else 'partially_refunded' end,
     settled_at = public.app_now()
   where id = pay.id;
+  perform public._after_settle(pay.id, p_reason);
 end $$;
 
 create or replace function public._complete(b public.bookings) returns public.bookings
@@ -430,6 +439,9 @@ begin
   if p_starts_at is null or p_ends_at is null or p_cachet_ars is null then raise exception 'invalid_listing' using errcode = 'P0001'; end if;
   if p_starts_at <= public.app_now() + interval '2 hours' then raise exception 'starts_too_soon' using errcode = 'P0001'; end if;
   if p_starts_at > public.app_now() + interval '1 year' then raise exception 'starts_too_far' using errcode = 'P0001'; end if;
+  -- Serializa las publicaciones de un mismo bar: sin esto, dos fechas superpuestas insertadas a la vez se esperan mutuamente (deadlock)
+  -- en la restricción de exclusión en vez de devolver 'listing_overlap'.
+  perform pg_advisory_xact_lock(hashtextextended('venue:' || p.venue_id, 0));
   begin
     insert into public.listings (venue_id, starts_at, ends_at, cachet_ars, genres, backline, notes, booking_mode, cancellation_policy)
     values (p.venue_id, p_starts_at, p_ends_at, p_cachet_ars, coalesce(p_genres, '{}'), coalesce(p_backline, '{}'),
@@ -518,24 +530,34 @@ begin
   return public._accept(b);
 end $$;
 
--- El bar "paga": el dinero queda retenido hasta que el show se realiza. Idempotente.
+-- Cobro confirmado: guarda la retención y confirma la reserva. Lo usan el pago simulado y Mercado Pago (una sola regla de dinero).
+create or replace function public._fund_booking(b public.bookings, p_provider text, p_ref text, p_venue_bps integer, p_musician_bps integer)
+returns public.bookings language plpgsql security definer set search_path = public, pg_temp as $$
+declare vfee bigint; r public.bookings;
+begin
+  vfee := public.calc_fee(b.cachet_ars, p_venue_bps);
+  insert into public.payments (booking_id, cachet_ars, venue_fee_bps, musician_fee_bps, venue_fee_ars, charged_ars, provider, provider_ref, created_at)
+  values (b.id, b.cachet_ars, p_venue_bps, p_musician_bps, vfee, b.cachet_ars + vfee, p_provider, p_ref, public.app_now());
+  update public.bookings set status = 'confirmada', updated_at = public.app_now() where id = b.id returning * into r;
+  perform public._log(b.id, 'confirmada', 'aceptada', 'confirmada', jsonb_build_object('charged', b.cachet_ars + vfee, 'provider', p_provider));
+  return r;
+end $$;
+
+-- El bar "paga" (modo simulado): el dinero queda retenido hasta que el show se realiza. Idempotente.
+-- Con payment_mode = 'mercadopago' el cobro real pasa por begin_payment + el webhook, nunca por acá.
 create or replace function public.fund_booking(p_booking_id uuid, p_provider_ref text default null)
 returns public.bookings language plpgsql security definer set search_path = public, pg_temp as $$
-declare p public.profiles; b public.bookings; s public.app_settings; vfee bigint;
+declare p public.profiles; b public.bookings; s public.app_settings;
 begin
   p := public.current_profile();
   b := public._lock_booking(p_booking_id);
   if p.venue_id is distinct from b.venue_id then raise exception 'booking_not_found' using errcode = 'P0001'; end if;
   if b.status = 'confirmada' then return b; end if;
   if b.status <> 'aceptada' then raise exception 'invalid_state' using errcode = 'P0001'; end if;
-  if public.app_now() > b.fund_by or public.app_now() >= b.starts_at then return public._expire(b); end if;
   select * into s from public.app_settings;
-  vfee := public.calc_fee(b.cachet_ars, s.venue_fee_bps);
-  insert into public.payments (booking_id, cachet_ars, venue_fee_bps, musician_fee_bps, venue_fee_ars, charged_ars, provider_ref, created_at)
-  values (b.id, b.cachet_ars, s.venue_fee_bps, s.musician_fee_bps, vfee, b.cachet_ars + vfee, p_provider_ref, public.app_now());
-  update public.bookings set status = 'confirmada', updated_at = public.app_now() where id = b.id returning * into b;
-  perform public._log(b.id, 'confirmada', 'aceptada', 'confirmada', jsonb_build_object('charged', b.cachet_ars + vfee));
-  return b;
+  if s.payment_mode <> 'simulado' then raise exception 'payment_required' using errcode = 'P0001'; end if;
+  if public.app_now() > b.fund_by or public.app_now() >= b.starts_at then return public._expire(b); end if;
+  return public._fund_booking(b, 'simulado', p_provider_ref, s.venue_fee_bps, s.musician_fee_bps);
 end $$;
 
 create or replace function public.cancel_booking(p_booking_id uuid, p_reason text default '')
@@ -718,7 +740,7 @@ begin
   if p_refund_pct is null or p_refund_pct not between 0 and 100 then raise exception 'invalid_pct' using errcode = 'P0001'; end if;
   b := public._lock_booking(p_booking_id);
   if b.status <> 'confirmada' or b.disputed_at is null then raise exception 'invalid_state' using errcode = 'P0001'; end if;
-  perform public._settle(b, p_refund_pct);
+  perform public._settle(b, p_refund_pct, 'disputa');
   update public.bookings set status = case when p_refund_pct = 100 then 'cancelada' else 'realizada' end,
     cancelled_by = case when p_refund_pct = 100 then 'sistema' else cancelled_by end,
     cancel_reason = case when p_refund_pct = 100 then 'dispute_refund' else cancel_reason end,
@@ -737,7 +759,7 @@ declare f text;
 begin
   for f in select p.oid::regprocedure::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace
            where n.nspname = 'public' and p.proname in (
-             'current_profile','_log','_lock_booking','_role_in','_reopen_listing','_accept','_expire','_settle',
+             'current_profile','_log','_lock_booking','_role_in','_reopen_listing','_accept','_expire','_settle','_fund_booking','_after_settle',
              '_complete','_recompute_rating','expire_stale_bookings','complete_due_bookings','publish_due_reviews',
              'admin_resolve_dispute','create_listing','cancel_listing','request_booking','respond_booking',
              'fund_booking','cancel_booking','complete_booking','report_problem','submit_review','send_message')

@@ -100,6 +100,11 @@ export const ERROR_MESSAGES: Record<string, string> = {
   invalid_request: 'Revisá los datos: nombre, barrio y dirección (para bares) son obligatorios.',
   invalid_evidence: 'El enlace debe empezar con https://',
   invalid_prefs: 'No pudimos guardar tus preferencias.',
+  payments_disabled: 'Los pagos con Mercado Pago todavía no están activados.',
+  already_paid: 'Esta reserva ya está paga.',
+  mp_unavailable: 'Mercado Pago no está disponible en este momento. Probá de nuevo en unos minutos.',
+  payment_required: 'Esta reserva se paga con Mercado Pago.',
+  invalid_alias: 'Ingresá un alias de 6 a 20 caracteres (con al menos una letra) o un CBU/CVU de 22 dígitos.',
   invalid_subscription: 'No pudimos registrar este dispositivo para recibir avisos.',
 };
 export const errorMessage = (code: string) => ERROR_MESSAGES[code] ?? 'Ocurrió un error inesperado. Probá de nuevo.';

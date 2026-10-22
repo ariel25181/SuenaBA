@@ -51,6 +51,8 @@ export const NOVEDADES: Novedad[] = [
     body: 'Un recorrido corto según cómo uses SuenaBA (anfitrión, músico o público) y esta sección para enterarte de cada función nueva. Podés repetir el tour cuando quieras.' },
   { id: 16, date: '2026-10-22', tag: 'nuevo', title: 'Avisos por email y en tu celular', audiences: AMBOS, tab: 'cuenta',
     body: 'Además de la bandeja, te avisamos por email y con notificaciones en este dispositivo cuando hay una solicitud, un pago o un mensaje. En Cuenta elegís qué recibir.' },
+  { id: 17, date: '2026-10-23', tag: 'nuevo', title: 'Pagos con Mercado Pago, reembolsos y cobros', audiences: AMBOS, tab: 'reservas',
+    body: 'Cuando el equipo activa los pagos reales, el bar paga la reserva con Mercado Pago y se confirma sola al acreditarse. Si se cancela, el reembolso vuelve al medio de pago. Los músicos cargan su alias o CBU/CVU en Cuenta para cobrar.' },
 ];
 
 /** Pestañas que existen para cada tipo de uso (para no ofrecer "Probar ahora" hacia algo que no está). */

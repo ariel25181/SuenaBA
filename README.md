@@ -138,9 +138,50 @@ Estados: `solicitada → aceptada → confirmada → realizada` (+ `rechazada`, 
 ```bash
 bun run build && npm test            # unitarios (reglas, API cliente, bookingLogic)
 npm run test:db                       # requiere Postgres: TEST_DATABASE_URL=postgres://postgres:pw@localhost:5432/postgres
+npm run test:delivery                 # worker de avisos y Mercado Pago contra servidores falsos (Resend, push con VAPID, MP)
 npm run test:ui                       # renderiza las pantallas (jsdom) contra un Postgres real, como usuarios con RLS
 npm run test:all
 ```
 `test:db` crea una base temporal con el esquema real y corre: ~60 casos borde, una **simulación concurrente de 10 bares × 10 músicos** (4 semillas, con distintas comisiones) que verifica invariantes (sin dobles reservas, dinero que cuadra, reseñas y calificaciones consistentes, auditoría válida) y una prueba de paridad TypeScript ↔ SQL.
 **CI**: el workflow `.github/workflows/ci.yml` corre todo en cada PR con un Postgres real.
 Para comprobar que las pruebas detectan fallos: `MUTATE=overlap npm run test:db` quita una protección a propósito y debe fallar.
+
+
+## Puesta en producción: avisos y cobros
+
+Todo lo de esta sección corre en **Edge Functions de Supabase** (`supabase/functions/`). Los módulos en `_shared/` no dependen de Deno y están probados contra servidores falsos de Resend, push y Mercado Pago; los archivos `index.ts` solo conectan variables de entorno.
+
+### 1. Aplicar las migraciones (en orden)
+`supabase-schema.sql` → `20261019000000_reservas.sql` → `20261020000000_airbnb_extras.sql` → `20261021000000_tour_novedades.sql` → `20261022000000_entrega_avisos.sql` → `20261023000000_mercado_pago.sql`.
+
+### 2. Avisos por email y push
+```bash
+npx web-push generate-vapid-keys                       # una vez
+supabase secrets set WORKER_SECRET=<mín. 16 caracteres> APP_URL=https://tu-sitio \
+  RESEND_API_KEY=re_xxx EMAIL_FROM="SuenaBA <avisos@tudominio.com>" \
+  VAPID_PUBLIC_KEY=... VAPID_PRIVATE_KEY=... VAPID_SUBJECT=mailto:vos@tudominio.com
+supabase functions deploy notify-worker
+```
+En el front definí `VITE_VAPID_PUBLIC_KEY` (la clave pública). Programá el worker cada minuto (Supabase Cron / pg_cron):
+```sql
+select cron.schedule('notify-worker', '* * * * *', $$ select net.http_post(
+  url := 'https://<proyecto>.supabase.co/functions/v1/notify-worker',
+  headers := jsonb_build_object('x-worker-secret', '<WORKER_SECRET>', 'Authorization', 'Bearer <SERVICE_ROLE_KEY>')) $$);
+```
+El dominio del remitente debe estar verificado en Resend. Entrega "al menos una vez": cada canal se marca por separado y el email usa clave de idempotencia.
+
+### 3. Cobros con Mercado Pago
+1. En el panel de desarrolladores de Mercado Pago creá una aplicación (Checkout Pro) y copiá el **Access Token** y la **clave secreta del webhook**.
+2. ```bash
+   supabase secrets set MP_ACCESS_TOKEN=APP_USR-... MP_WEBHOOK_SECRET=<clave secreta del webhook> APP_URL=https://tu-sitio  # MP_SANDBOX=true para pruebas
+   supabase functions deploy create-payment
+   supabase functions deploy mp-webhook --no-verify-jwt     # Mercado Pago no envía JWT: la seguridad es la firma
+   supabase functions deploy process-refunds
+   ```
+3. En Mercado Pago → Webhooks: URL `https://<proyecto>.supabase.co/functions/v1/mp-webhook`, evento **Pagos**.
+4. Programá `process-refunds` cada 5 minutos (igual que el worker de avisos, con `x-worker-secret`).
+5. **Probá primero con credenciales de prueba y `MP_SANDBOX=true`**, y recién después activá los pagos reales: `update app_settings set payment_mode = 'mercadopago';` (con `'simulado'` todo sigue como antes).
+
+**Cobros a músicos**: Mercado Pago retiene el dinero en tu cuenta. Al realizarse el show se crea un pago pendiente (tabla `payouts`) con el alias/CBU/CVU del músico; el equipo transfiere y lo registra con `select admin_mark_payout_paid('<id>', '<referencia>')`. La lista de pendientes: `select * from payouts where status = 'pendiente'`. (Una transferencia automática requiere el producto de Marketplace/Split de Mercado Pago y un acuerdo comercial aparte.)
+
+**Operación diaria (service role)**: `select admin_review_profile_request('<id>', true, 'ok')`, `select admin_resolve_dispute('<reserva>', <% de reembolso>)`.

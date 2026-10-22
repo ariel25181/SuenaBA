@@ -141,6 +141,28 @@ const NotificationSettings: React.FC<{ isBar: boolean }> = ({ isBar }) => {
   );
 };
 
+const PayoutCard: React.FC<{ profile: Profile }> = ({ profile }) => {
+  const { api } = useSession();
+  const act = useAction();
+  const [alias, setAlias] = useState(profile.payoutAlias ?? '');
+  const [saved, setSaved] = useState(profile.payoutAlias ?? '');
+  const { data: payouts, reload } = useLoad(() => api.myPayouts(), [profile.userId]);
+  const save = async () => { const v = alias.trim(); if ((await act.run(() => api.setPayoutAlias(v || null), v ? 'Alias guardado.' : 'Alias borrado.')) !== undefined) { setSaved(v); reload(); } };
+  return (
+    <Card className="space-y-2" aria-label="Cobros">
+      <h3 className="text-sm font-bold text-slate-100">Cobros a tu cuenta</h3>
+      <Field label="Alias o CBU/CVU para recibir tus cobros" hint="Es donde te transferimos el cachet después de cada show.">
+        <input className={inputCls} value={alias} onChange={(e) => setAlias(e.target.value)} placeholder="mi.alias.mp" autoComplete="off" />
+      </Field>
+      {act.error && <Banner kind="error">{act.error}</Banner>}{act.ok && <Banner kind="ok">{act.ok}</Banner>}
+      <Btn disabled={act.busy || alias.trim() === saved} onClick={save}>Guardar alias</Btn>
+      {!saved && (payouts ?? []).some((p) => p.status === 'pendiente') && <Banner kind="info">Tenés cobros pendientes: cargá tu alias para que podamos transferirte.</Banner>}
+      {(payouts ?? []).length > 0 && <ul className="space-y-1 text-xs text-slate-300">{(payouts ?? []).map((p) => (
+        <li key={p.id} className="flex justify-between"><span>{fmtShort(p.createdAt)} · {p.status === 'pagado' ? `transferido (ref. ${p.reference})` : 'pendiente de transferencia'}</span><strong>{ars(p.amountArs)}</strong></li>))}</ul>}
+    </Card>
+  );
+};
+
 export const AccountView: React.FC<{ profile: Profile }> = ({ profile }) => {
   const { api, signOut, state } = useSession();
   const help = useHelp();
@@ -172,6 +194,7 @@ export const AccountView: React.FC<{ profile: Profile }> = ({ profile }) => {
       {!isBar && <Card className="space-y-2"><h3 className="text-sm font-bold text-slate-100">Alertas de búsqueda</h3>
         {searches.length === 0 && <p className="text-xs text-slate-500">Guardá una búsqueda en Explorar y te avisamos cuando se publique una fecha que coincida.</p>}
         {searches.map((s) => <div key={s.id} className="flex items-center justify-between text-sm text-slate-200"><span>{s.name}</span><Btn kind="ghost" aria-label={`Borrar alerta ${s.name}`} onClick={async () => { await act.run(() => api.deleteSearch(s.id)); reload(); }}>Borrar</Btn></div>)}</Card>}
+      {!isBar && <PayoutCard profile={profile} />}
       <NotificationSettings isBar={isBar} />
       <Card className="space-y-2"><h3 className="text-sm font-bold text-slate-100">Ayuda</h3>
         <Btn kind="ghost" className="w-full" onClick={help.openTour}>Ver el tour otra vez</Btn>

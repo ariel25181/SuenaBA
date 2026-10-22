@@ -112,7 +112,7 @@ export const ExploreView: React.FC<{ profile: Profile; onBooked: (bookingId: str
 export const ListingSheet: React.FC<{ r: SearchResult; profile: Profile; onClose: () => void; onBooked: (id: string) => void }> = ({ r, profile, onClose, onBooked }) => {
   const { api } = useSession();
   const act = useAction();
-  const [fees, setFees] = useState<Fees>({ venueFeeBps: 0, musicianFeeBps: 0 });
+  const [fees, setFees] = useState<Fees>({ venueFeeBps: 0, musicianFeeBps: 0, paymentMode: 'simulado' });
   const [cachet, setCachet] = useState(String(r.cachetArs)), [note, setNote] = useState('');
   useEffect(() => { api.fees().then(setFees).catch(() => {}); }, [api]);
   const isMusician = profile.role === 'musico', instant = r.bookingMode === 'instant';

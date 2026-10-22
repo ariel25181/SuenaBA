@@ -31,12 +31,14 @@ export interface AppNotification { id: string; kind: string; bookingId: string |
 export interface SavedSearch { id: string; name: string; filters: Record<string, unknown>; createdAt: string }
 export interface Earnings { role: 'bar' | 'musico'; pendingArs: number; settledArs: number; refundedArs: number; showsCompleted: number }
 export interface EntityStats { completed: number; cancelledAfterConfirm: number; cancelRate: number; responseRate: number | null; avgResponseHours: number | null; rating: number; reviewCount: number; isSuperhost: boolean }
-export interface Profile { userId: string; role: 'bar' | 'musico'; venueId: string | null; musicianId: string | null; verified: boolean; lateCancellations: number }
+export interface Profile { userId: string; role: 'bar' | 'musico'; venueId: string | null; musicianId: string | null; verified: boolean; lateCancellations: number; payoutAlias: string | null }
 export interface ProfileRequest { id: string; role: 'bar' | 'musico'; displayName: string; status: 'pendiente' | 'aprobada' | 'rechazada'; reviewerNote: string | null; createdAt: string }
 export interface BookingEvent { id: number; event: string; fromStatus: string | null; toStatus: string | null; at: string; meta: Record<string, unknown> }
 export interface PaymentInfo { status: 'held' | 'released' | 'refunded' | 'partially_refunded'; chargedArs: number; cachetArs: number; venueFeeArs: number; refundedArs: number; payoutArs: number; platformFeeArs: number; provider: string }
 export interface EntityLite { id: string; name: string; photo: string | null; subtitle: string }
-export interface Fees { venueFeeBps: number; musicianFeeBps: number }
+export interface Fees { venueFeeBps: number; musicianFeeBps: number; paymentMode: 'simulado' | 'mercadopago' }
+export interface Payout { id: string; bookingId: string; amountArs: number; status: 'pendiente' | 'pagado'; reference: string | null; createdAt: string; paidAt: string | null }
+export interface StartedPayment { status: string; intentId: string; initPoint: string | null }
 
 export interface NotifPrefs { emailEnabled: boolean; pushEnabled: boolean; mutedKinds: string[] }
 export interface UserPrefs { audience: 'anfitrion' | 'musico' | 'publico' | null; tourVersion: number; whatsNewSeen: number }
@@ -75,7 +77,7 @@ export const mapStats = (r: Row): EntityStats => ({
   avgResponseHours: r.avg_response_hours === null || r.avg_response_hours === undefined ? null : Number(r.avg_response_hours),
   rating: num(r.rating), reviewCount: num(r.review_count), isSuperhost: !!r.is_superhost,
 });
-export const mapProfile = (r: Row): Profile => ({ userId: r.user_id, role: r.role, venueId: r.venue_id ?? null, musicianId: r.musician_id ?? null, verified: !!r.verified, lateCancellations: num(r.late_cancellations) });
+export const mapProfile = (r: Row): Profile => ({ userId: r.user_id, role: r.role, venueId: r.venue_id ?? null, musicianId: r.musician_id ?? null, verified: !!r.verified, lateCancellations: num(r.late_cancellations), payoutAlias: r.payout_alias ?? null });
 export const mapProfileRequest = (r: Row): ProfileRequest => ({ id: r.id, role: r.role, displayName: r.display_name, status: r.status, reviewerNote: r.reviewer_note ?? null, createdAt: r.created_at });
 export const mapEvent = (r: Row): BookingEvent => ({ id: Number(r.id), event: r.event, fromStatus: r.from_status ?? null, toStatus: r.to_status ?? null, at: r.at, meta: r.meta ?? {} });
 export const mapPayment = (r: Row): PaymentInfo => ({ status: r.status, chargedArs: num(r.charged_ars), cachetArs: num(r.cachet_ars), venueFeeArs: num(r.venue_fee_ars), refundedArs: num(r.refunded_ars), payoutArs: num(r.payout_ars), platformFeeArs: num(r.platform_fee_ars), provider: r.provider });
@@ -84,6 +86,8 @@ export const mapNotifPrefs = (r: Row): NotifPrefs => ({ emailEnabled: r.email_en
 export const mapPrefs = (r: Row): UserPrefs => ({ audience: r.audience ?? null, tourVersion: num(r.tour_version), whatsNewSeen: num(r.whats_new_seen) });
 export const mapShow = (r: Row): PublicShow => ({ bookingId: r.booking_id, venueId: r.venue_id, venueName: r.venue_name, neighborhood: r.neighborhood, address: r.address ?? '', coverPhoto: r.cover_photo ?? null,
   musicianName: r.musician_name, musicianFormat: r.musician_format, genres: r.genres ?? [], startsAt: r.starts_at, endsAt: r.ends_at, totalCount: num(r.total_count) });
+
+export const mapPayout = (r: Row): Payout => ({ id: r.id, bookingId: r.booking_id, amountArs: num(r.amount_ars), status: r.status, reference: r.reference ?? null, createdAt: r.created_at, paidAt: r.paid_at ?? null });
 
 export const mapMessage = (r: Row): Message => ({ id: r.id, bookingId: r.booking_id, senderRole: r.sender_role, body: r.body, createdAt: r.created_at });
 
@@ -97,6 +101,7 @@ export interface AuthClient {
 }
 export interface AppClient extends RpcClient { auth: AuthClient }
 export interface RpcClient {
+  functions?: { invoke(name: string, opts?: { body?: unknown }): PromiseLike<{ data: any; error: (Error & { context?: { json?: () => Promise<any> } }) | { message: string; context?: { json?: () => Promise<any> } } | null }> };
   rpc(fn: string, args?: Record<string, unknown>): PromiseLike<{ data: any; error: { message: string; code?: string } | null }>;
   from(table: string): any;
 }
@@ -143,7 +148,7 @@ export function createBookingsApi(client: RpcClient) {
     markRead: (ids?: string[]) => callScalar<number>('mark_notifications_read', { p_ids: ids ?? null }),
     // Cuenta
     earnings: async () => (await callRows('my_earnings', {}, mapEarnings))[0],
-    fees: async (): Promise<Fees> => { const [r] = await read(client.from('app_settings').select('venue_fee_bps,musician_fee_bps'), (x) => ({ venueFeeBps: num(x.venue_fee_bps), musicianFeeBps: num(x.musician_fee_bps) })); return r ?? { venueFeeBps: 0, musicianFeeBps: 0 }; },
+    fees: async (): Promise<Fees> => { const [r] = await read(client.from('app_settings').select('venue_fee_bps,musician_fee_bps,payment_mode'), (x): Fees => ({ venueFeeBps: num(x.venue_fee_bps), musicianFeeBps: num(x.musician_fee_bps), paymentMode: x.payment_mode === 'mercadopago' ? 'mercadopago' : 'simulado' })); return r ?? { venueFeeBps: 0, musicianFeeBps: 0, paymentMode: 'simulado' }; },
     myProfile: async () => (await read(client.from('profiles').select('*'), mapProfile))[0] ?? null,
     myProfileRequest: async () => (await read(client.from('profile_requests').select('*').order('created_at', { ascending: false }).limit(1), mapProfileRequest))[0] ?? null,
     requestProfile: (p: { role: 'bar' | 'musico'; displayName: string; neighborhood?: string; address?: string; bio?: string; evidenceUrl?: string }) =>
@@ -160,6 +165,19 @@ export function createBookingsApi(client: RpcClient) {
       (await callRows('set_notification_prefs', { p_email: p.email ?? null, p_push: p.push ?? null, p_muted_kinds: p.mutedKinds ?? null }, mapNotifPrefs))[0],
     registerPush: (s: { endpoint: string; p256dh: string; auth: string; userAgent?: string }) => callScalar<string>('register_push_subscription', { p_endpoint: s.endpoint, p_p256dh: s.p256dh, p_auth: s.auth, p_user_agent: s.userAgent ?? null }),
     removePush: (endpoint: string) => callScalar<boolean>('remove_push_subscription', { p_endpoint: endpoint }),
+    // Cobros reales (Mercado Pago) y pagos a músicos
+    startPayment: async (bookingId: string): Promise<StartedPayment> => {
+      if (!client.functions) throw new BookingError('payments_disabled', errorMessage('payments_disabled'));
+      const { data, error } = await client.functions.invoke('create-payment', { body: { booking_id: bookingId } });
+      if (error) {
+        let code = 'mp_unavailable';
+        try { const j = await (error as any).context?.json?.(); if (j?.error) code = String(j.error); } catch { /* sin detalle */ }
+        throw new BookingError(code, errorMessage(code));
+      }
+      return { status: data.status, intentId: data.intent_id, initPoint: data.init_point ?? null };
+    },
+    setPayoutAlias: (alias: string | null) => callScalar<null>('set_payout_alias', { p_alias: alias }),
+    myPayouts: () => read(client.from('payouts').select('id,booking_id,amount_ars,status,reference,created_at,paid_at').order('created_at', { ascending: false }), mapPayout),
     // Detalle de reservas
     booking: async (id: string) => (await read(client.from('bookings').select('*').eq('id', id), mapBooking))[0] ?? null,
     bookingEvents: (bookingId: string) => read(client.from('booking_events').select('*').eq('booking_id', bookingId).order('id', { ascending: true }), mapEvent),

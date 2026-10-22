@@ -6,4 +6,6 @@ for (const k of ['window', 'document', 'navigator', 'HTMLElement', 'HTMLInputEle
   if (!(k in g) || k === 'window' || k === 'document') Object.defineProperty(g, k, { value: w[k], configurable: true, writable: true });
 Object.defineProperty(g, 'navigator', { value: w.navigator, configurable: true });
 Object.defineProperty(g, 'localStorage', { value: w.localStorage, configurable: true });
+Object.defineProperty(g, 'location', { get: () => w.location, configurable: true });
+Object.defineProperty(g, 'history', { get: () => w.history, configurable: true });
 g.IS_REACT_ACT_ENVIRONMENT = true;
