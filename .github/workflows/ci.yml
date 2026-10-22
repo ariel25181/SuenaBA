@@ -7,6 +7,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     services:
       postgres:
         image: postgres:16
@@ -34,6 +37,18 @@ jobs:
       - run: npm run test:delivery
         env:
           TEST_DATABASE_URL: postgres://postgres:pw@localhost:5432/postgres
-      - run: npm run test:ui
+      - name: npm run test:ui
+        shell: bash
+        run: npm run test:ui 2>&1 | tee ui-test.log
         env:
           TEST_DATABASE_URL: postgres://postgres:pw@localhost:5432/postgres
+      - name: Detalle de las pruebas de pantalla que fallaron (comentario en el PR)
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { echo '### Falló `npm run test:ui`'; echo '```'; grep -nE '^\s*not ok|^# (tests|pass|fail)' ui-test.log | head -40; echo '--- detalle ---';
+            grep -nE -B2 -A22 'not ok' ui-test.log | grep -vE 'node:internal|^\s*at ' | head -150; echo '```'; } > ui-fail.md
+          head -c 60000 ui-fail.md > ui-fail-short.md
+          gh pr comment ${{ github.event.pull_request.number }} --body-file ui-fail-short.md
