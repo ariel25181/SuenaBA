@@ -1,0 +1,71 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pw
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: npx tsc --noEmit
+      - run: bun run build
+      - run: npm test
+      - name: npm run test:db
+        shell: bash
+        run: mkdir -p logs && npm run test:db 2>&1 | tee logs/db.log
+        env:
+          TEST_DATABASE_URL: postgres://postgres:pw@localhost:5432/postgres
+      - name: npm run test:delivery
+        shell: bash
+        run: mkdir -p logs && npm run test:delivery 2>&1 | tee logs/delivery.log
+        env:
+          TEST_DATABASE_URL: postgres://postgres:pw@localhost:5432/postgres
+      - name: npm run test:ui
+        shell: bash
+        run: mkdir -p logs && npm run test:ui 2>&1 | tee logs/ui.log
+        env:
+          TEST_DATABASE_URL: postgres://postgres:pw@localhost:5432/postgres
+      - name: Detalle de las pruebas que fallaron (comentario en el PR)
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          shopt -s nullglob
+          { echo "### Falló el CI (commit ${GITHUB_SHA::7})"
+            for f in logs/*.log; do
+              echo; echo "**$f**"; echo '```'
+              grep -E '^# (tests|pass|fail)' "$f" | head -4
+              grep -nE '^\s*not ok' "$f" | head -15
+              echo '--- errores de proceso / no capturados ---'
+              grep -nEi 'unhandled|uncaught|ECONN|terminat|\[pool\]|\[admin\]|timed out|too many clients|deadlock|FATAL' "$f" | head -25
+              echo '--- final del log ---'
+              tail -n 45 "$f" | grep -vE 'node:internal|^\s*at '
+              echo '--- detalle ---'
+              grep -E -A18 '^\s*not ok' "$f" | grep -vE 'node:internal|^\s*at |^\s*\.\.\.$' | head -90
+              echo '```'
+            done; } > ci-fail.md
+          head -c 60000 ci-fail.md > ci-fail-short.md
+          gh pr comment ${{ github.event.pull_request.number }} --body-file ci-fail-short.md
