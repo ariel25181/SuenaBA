@@ -58,6 +58,8 @@ jobs:
               echo; echo "**$f**"; echo '```'
               grep -E '^# (tests|pass|fail)' "$f" | head -4
               grep -nE '^\s*not ok' "$f" | head -15
+              echo '--- errores de proceso / no capturados ---'
+              grep -nEi 'unhandled|uncaught|ECONN|terminat|\[pool\]|\[admin\]|timed out|too many clients|deadlock|FATAL' "$f" | head -25
               echo '--- detalle ---'
               grep -E -A18 '^\s*not ok' "$f" | grep -vE 'node:internal|^\s*at |^\s*\.\.\.$' | head -90
               echo '```'

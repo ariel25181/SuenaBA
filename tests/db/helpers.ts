@@ -15,6 +15,7 @@ const SQL_FILES = ['tests/db/00_supabase_stub.sql', 'supabase-schema.sql', 'supa
 /** Crea una base limpia con el esquema real + migración y devuelve un Pool. */
 export async function createTestDb(name: string, poolSize = 30): Promise<pg.Pool> {
   const admin = new pg.Client({ connectionString: ADMIN_URL });
+  admin.on('error', (e) => console.error('[admin] error de conexión (ignorado en tests):', e.message));
   await admin.connect();
   await admin.query(`drop database if exists ${name} with (force)`);
   await admin.query(`create database ${name}`);
@@ -22,6 +23,9 @@ export async function createTestDb(name: string, poolSize = 30): Promise<pg.Pool
   const url = new URL(ADMIN_URL);
   url.pathname = '/' + name;
   const pool = new pg.Pool({ connectionString: url.toString(), max: poolSize });
+  // Un cliente ocioso del pool que pierde la conexión emite 'error'; sin este listener Node lo trata como excepción no capturada
+  // y puede tumbar el proceso de test aunque todas las pruebas hayan pasado.
+  pool.on('error', (e) => console.error('[pool] error de conexión ocioso (ignorado en tests):', e.message));
   const c = await pool.connect();
   try {
     for (const f of SQL_FILES) await c.query(fs.readFileSync(path.join(ROOT, f), 'utf8'));
@@ -31,11 +35,11 @@ export async function createTestDb(name: string, poolSize = 30): Promise<pg.Pool
 }
 
 export async function dropTestDb(pool: pg.Pool, name: string) {
-  await pool.end();
+  await pool.end().catch((e) => console.error('[pool] error al cerrar:', e.message));
   const admin = new pg.Client({ connectionString: ADMIN_URL });
+  admin.on('error', (e) => console.error('[admin] error de conexión (ignorado en tests):', e.message));
   await admin.connect();
-  await admin.query(`drop database if exists ${name} with (force)`);
-  await admin.end();
+  try { await admin.query(`drop database if exists ${name} with (force)`); } finally { await admin.end().catch(() => {}); }
 }
 
 export class BizError extends Error {
