@@ -127,10 +127,10 @@ describe('Regreso del checkout', () => {
     const b = await accepted(10);
     await fetch0(b.id);                                                                                         // el bar ya generó el link de pago
     const i = await intent(b.id);
-    setTimeout(() => { pay('445566', i.id, 105000); }, 250);                                                    // el webhook llega después de que el bar vuelve
     mount(bar1, `?pago=ok&reserva=${b.id}`); await login(bar1);
     const sheet = await screen.findByRole('dialog', { name: 'Reserva con Músico 1' }, T);
-    await within(sheet).findByText(/Estamos confirmando tu pago/, {}, T);
+    await within(sheet).findByText(/Estamos confirmando tu pago/, {}, T);                                       // el bar volvió y todavía no llegó el aviso
+    assert.equal((await pay('445566', i.id, 105000)).status, 200);                                              // recién ahora llega el webhook
     await within(sheet).findByText('¡Pago confirmado! La fecha quedó reservada.', {}, T);
     within(sheet).getByText('Confirmada');
     assert.equal(window.location.search, '', 'la URL se limpia');

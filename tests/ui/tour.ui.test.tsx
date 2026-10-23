@@ -119,7 +119,8 @@ describe('Público: cartelera sin cuenta', () => {
     await screen.findByText('1 show confirmado', {}, T);
     assert.ok(!screen.queryByText('Músico 1')); screen.getByText('Músico 2');
     fireEvent.click(screen.getByRole('button', { name: 'San Telmo' })); fireEvent.click(screen.getByRole('button', { name: 'Jazz' }));
-    await screen.findByText('Músico 1', {}, T); assert.ok(!screen.queryByText('Músico 2'));
+    await screen.findByText('1 show confirmado', {}, T);                                       // espera el resultado filtrado, no un texto que ya estaba
+    await screen.findByText('Músico 1', {}, T); await waitFor(() => assert.ok(!screen.queryByText('Músico 2'), 'Músico 2 no debería verse con el filtro Jazz'), T);
     fireEvent.click(screen.getByRole('button', { name: 'Cambiar mi tipo de uso' }));
     await screen.findByText('¿Cómo vas a usar SuenaBA?', {}, T);
     assert.equal(getPrefs().audience, null);
