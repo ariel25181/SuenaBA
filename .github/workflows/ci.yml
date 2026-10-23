@@ -52,6 +52,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set +e
           shopt -s nullglob
           { echo "### Falló el CI (commit ${GITHUB_SHA::7})"
             for f in logs/*.log; do
@@ -60,6 +61,8 @@ jobs:
               grep -nE '^\s*not ok' "$f" | head -15
               echo '--- errores de proceso / no capturados ---'
               grep -nEi 'unhandled|uncaught|ECONN|terminat|\[pool\]|\[admin\]|timed out|too many clients|deadlock|FATAL' "$f" | head -25
+              echo '--- final del log ---'
+              tail -n 45 "$f" | grep -vE 'node:internal|^\s*at '
               echo '--- detalle ---'
               grep -E -A18 '^\s*not ok' "$f" | grep -vE 'node:internal|^\s*at |^\s*\.\.\.$' | head -90
               echo '```'
