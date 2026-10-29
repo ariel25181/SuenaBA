@@ -96,3 +96,119 @@ Para vincular este proyecto a tu cuenta personal de GitHub:
 ---
 
 Desarrollado para la comunidad de música en vivo y gastronomía de Buenos Aires.
+
+## Reservas estilo Airbnb (bares = anfitriones, músicos = huéspedes)
+
+Flujo: el bar **publica una fecha** → el músico **solicita** (o reserva al instante) → el bar **acepta** →
+el bar **paga** (el dinero queda retenido) → se hace el show → se libera el pago → **reseñas cruzadas**.
+Estados: `solicitada → aceptada → confirmada → realizada` (+ `rechazada`, `cancelada`, `expirada`).
+
+- **Comisión configurable** en `app_settings` (`venue_fee_bps`, `musician_fee_bps`, 100 bps = 1%). Por defecto **0**. Se congela al pagar.
+- **Cancelación** según política del bar (flexible / moderada / estricta). Si cancela el músico, el bar recibe reembolso total y el músico suma una cancelación tardía si faltaban menos de 24 h.
+- **Reseñas**: solo tras un show realizado, una por parte; se publican cuando ambos reseñan o a los 14 días.
+- **Disputas**: cualquiera de las partes puede reportar un problema tras empezar el show; el pago queda retenido hasta que el equipo resuelve (`admin_resolve_dispute`).
+- Toda escritura pasa por funciones RPC (`supabase/migrations/20261019000000_reservas.sql`); los clientes solo leen, con RLS por participante.
+- Cliente: `src/lib/bookingsApi.ts` (RPC + mensajes de error en español) y `src/domain/bookingRules.ts` (reglas de dinero/estados para previsualizar en la UI).
+
+### Funciones tipo Airbnb incluidas
+| Función | Cómo funciona |
+|---|---|
+| **Publicar fechas** con calendario, cachet, backline, política de cancelación y modo (instantánea / con aprobación) | `create_listing`, panel "Mis fechas" |
+| **Búsqueda** por fecha, barrio, género, cachet, modo, calificación, texto; orden y paginación; ocultar fechas que se pisan con mis shows | `search_listings`, pestaña "Explorar" |
+| **Favoritos** (fechas, bares, músicos) | `toggle_favorite` |
+| **Alertas de búsqueda**: guardás filtros y te avisan cuando se publica una fecha que coincide | `save_search` + trigger |
+| **Notificaciones** internas por cada evento de la reserva y por mensajes (con cola de entrega para push/email) | tabla `notifications`, `claim_pending_notifications` |
+| **Chat** por reserva | `send_message` |
+| **Reserva, pago retenido, cancelación con reembolso, disputas, vencimientos** | ver más arriba |
+| **Reseñas cruzadas** que se publican cuando ambos reseñan o a los 14 días | `submit_review` |
+| **Superanfitrión / Superartista** (shows, calificación, cancelaciones y tasa de respuesta) | `entity_stats` |
+| **Verificación de perfiles**: solicitud → aprobación del equipo → perfil verificado (opcionalmente obligatoria) | `request_profile`, `admin_review_profile_request`, `app_settings.require_verification` |
+| **Ganancias / pagos** del bar y del músico | `my_earnings`, pestaña "Cuenta" |
+
+**Pantallas**: nueva pestaña **Reservas** en la app (login con Supabase Auth → alta de perfil → Explorar / Mis fechas / Reservas / Favoritos / Avisos / Cuenta). Código en `src/components/reservas/`. Las pantallas viejas (Cartelera, Convocatorias, etc.) siguen funcionando con su estado local.
+
+### Aplicar en Supabase
+1. Ejecutar `supabase-schema.sql` (si no está aplicado) y luego, en orden, `supabase/migrations/20261019000000_reservas.sql` y `supabase/migrations/20261020000000_airbnb_extras.sql` en el SQL Editor.
+2. Los usuarios nuevos piden su perfil desde la app (`request_profile`); el equipo lo aprueba con `select admin_review_profile_request('<id>', true, 'ok')` (service role), que crea el bar/músico y el perfil verificado.
+3. Programar (pg_cron o Edge Function) cada 5–15 min: `select expire_stale_bookings(); select complete_due_bookings();` y a diario `select publish_due_reviews();`.
+
+> **Pagos simulados**: hoy `fund_booking` registra una retención con `provider = 'simulado'`. Falta integrar Mercado Pago (o similar) antes de cobrar dinero real.
+
+### Tests
+```bash
+bun run build && npm test            # unitarios (reglas, API cliente, bookingLogic)
+npm run test:db                       # requiere Postgres: TEST_DATABASE_URL=postgres://postgres:pw@localhost:5432/postgres
+npm run test:delivery                 # worker de avisos y Mercado Pago contra servidores falsos (Resend, push con VAPID, MP)
+npm run test:ui                       # renderiza las pantallas (jsdom) contra un Postgres real, como usuarios con RLS
+npm run test:all
+```
+`test:db` crea una base temporal con el esquema real y corre: ~60 casos borde, una **simulación concurrente de 10 bares × 10 músicos** (4 semillas, con distintas comisiones) que verifica invariantes (sin dobles reservas, dinero que cuadra, reseñas y calificaciones consistentes, auditoría válida) y una prueba de paridad TypeScript ↔ SQL.
+**CI**: el workflow `.github/workflows/ci.yml` corre todo en cada PR con un Postgres real.
+Para comprobar que las pruebas detectan fallos: `MUTATE=overlap npm run test:db` quita una protección a propósito y debe fallar.
+
+
+## Puesta en producción: avisos y cobros
+
+### Estado en el proyecto Supabase `SuenaBA` (dncmdvxcxizbcjacpkoe)
+| Paso | Estado |
+|---|---|
+| 6 migraciones + endurecimiento (`btree_gist` en `extensions`, `search_path` fijo, secuencia de auditoría) | ✅ Aplicadas y verificadas contra el repositorio (huella idéntica: 66 funciones, 199 columnas, 103 restricciones, 43 índices, 19 políticas) |
+| Permisos | ✅ Auditados: visitantes y usuarios no tienen escritura directa en ninguna tabla; las funciones internas, de workers y de administración no son ejecutables por ellos |
+| Prueba de humo real (con rollback) | ✅ Flujo completo + 16 controles de permisos |
+| Tareas automáticas en la base (`suenaba-vencimientos` cada 5 min, `suenaba-resenas` diaria) | ✅ Programadas |
+| Edge Functions `notify-worker`, `create-payment`, `mp-webhook`, `process-refunds` | ✅ Desplegadas y respondiendo (sin secretos devuelven "no configurado") |
+| Secretos (Resend, Mercado Pago, VAPID, secreto de workers) | ⏳ Los carga **vos** con `bash scripts/configurar-secretos.sh` (no se pueden crear cuentas ni claves desde acá) |
+| Tareas de avisos y reembolsos (cron + vault) | ⏳ SQL que imprime el script |
+| Pagos reales | ⏳ `payment_mode = 'simulado'` hasta que pruebes Mercado Pago en sandbox |
+
+> Las funciones se desplegaron con el conector (copias aplanadas: solo cambian las rutas de importación). Para redeplegar desde este repo: `supabase functions deploy create-payment` / `notify-worker --no-verify-jwt` / `mp-webhook --no-verify-jwt` / `process-refunds --no-verify-jwt`.
+
+### Lo que falta hacer (vos), en orden
+1. **Autenticación de Supabase** (Authentication → Providers → Email): para testers desactivá *Confirm email* (el correo integrado de Supabase está muy limitado) o configurá un SMTP propio; en *URL Configuration* poné la URL de tu sitio.
+2. `bash scripts/configurar-secretos.sh` (pregunta URL, Resend, Mercado Pago; genera solo las claves VAPID y el secreto de workers; **no muestra las claves**). Después pegá en el SQL Editor el bloque que imprime y cargá `VITE_VAPID_PUBLIC_KEY` en las variables de tu hosting.
+3. En Mercado Pago → Webhooks: URL `https://dncmdvxcxizbcjacpkoe.supabase.co/functions/v1/mp-webhook`, evento **Pagos**.
+4. **Beta con testers**: `update app_settings set auto_approve_profiles = true;` (los perfiles se crean solos, sin verificar). Para volver a aprobación manual: `= false`.
+5. Probá Mercado Pago en sandbox (`MP_SANDBOX=true`) y recién después: `update app_settings set payment_mode = 'mercadopago';`.
+
+### Referencia (instalación desde cero)
+
+Todo lo de esta sección corre en **Edge Functions de Supabase** (`supabase/functions/`). Los módulos en `_shared/` no dependen de Deno y están probados contra servidores falsos de Resend, push y Mercado Pago; los archivos `index.ts` solo conectan variables de entorno.
+
+### 1. Aplicar las migraciones (en orden)
+`supabase-schema.sql` → `20261019000000_reservas.sql` → `20261020000000_airbnb_extras.sql` → `20261021000000_tour_novedades.sql` → `20261022000000_entrega_avisos.sql` → `20261023000000_mercado_pago.sql` → `20261024000000_beta_abierta.sql`.
+
+### 2. Avisos por email y push
+```bash
+npx web-push generate-vapid-keys                       # una vez
+supabase secrets set WORKER_SECRET=<mín. 16 caracteres> APP_URL=https://tu-sitio \
+  RESEND_API_KEY=re_xxx EMAIL_FROM="SuenaBA <avisos@tudominio.com>" \
+  VAPID_PUBLIC_KEY=... VAPID_PRIVATE_KEY=... VAPID_SUBJECT=mailto:vos@tudominio.com
+supabase functions deploy notify-worker --no-verify-jwt
+```
+En el front definí `VITE_VAPID_PUBLIC_KEY` (la clave pública). Programá el worker cada minuto (Supabase Cron / pg_cron):
+```sql
+-- (el script scripts/configurar-secretos.sh imprime este SQL ya completo, guardando el secreto en Vault)
+select cron.schedule('suenaba-avisos', '* * * * *', $$ select net.http_post(
+  url := 'https://<proyecto>.supabase.co/functions/v1/notify-worker',
+  headers := jsonb_build_object('x-worker-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'worker_secret'))) $$);
+```
+El dominio del remitente debe estar verificado en Resend. Entrega "al menos una vez": cada canal se marca por separado y el email usa clave de idempotencia.
+
+### 3. Cobros con Mercado Pago
+1. En el panel de desarrolladores de Mercado Pago creá una aplicación (Checkout Pro) y copiá el **Access Token** y la **clave secreta del webhook**.
+2. ```bash
+   supabase secrets set MP_ACCESS_TOKEN=APP_USR-... MP_WEBHOOK_SECRET=<clave secreta del webhook> APP_URL=https://tu-sitio  # MP_SANDBOX=true para pruebas
+   supabase functions deploy create-payment
+   supabase functions deploy mp-webhook --no-verify-jwt     # Mercado Pago no envía JWT: la seguridad es la firma
+   supabase functions deploy process-refunds --no-verify-jwt
+   ```
+3. En Mercado Pago → Webhooks: URL `https://<proyecto>.supabase.co/functions/v1/mp-webhook`, evento **Pagos**.
+4. Programá `process-refunds` cada 5 minutos (igual que el worker de avisos, con `x-worker-secret`).
+5. **Probá primero con credenciales de prueba y `MP_SANDBOX=true`**, y recién después activá los pagos reales: `update app_settings set payment_mode = 'mercadopago';` (con `'simulado'` todo sigue como antes).
+
+**Cobros a músicos**: Mercado Pago retiene el dinero en tu cuenta. Al realizarse el show se crea un pago pendiente (tabla `payouts`) con el alias/CBU/CVU del músico; el equipo transfiere y lo registra con `select admin_mark_payout_paid('<id>', '<referencia>')`. La lista de pendientes: `select * from payouts where status = 'pendiente'`. (Una transferencia automática requiere el producto de Marketplace/Split de Mercado Pago y un acuerdo comercial aparte.)
+
+**Operación diaria (service role)**: `select admin_review_profile_request('<id>', true, 'ok')`, `select admin_resolve_dispute('<reserva>', <% de reembolso>)`.
+
+### Advertencias del analizador de seguridad de Supabase (aceptadas a propósito)
+`anon_security_definer_function_executable` / `authenticated_security_definer_function_executable`: son las funciones públicas por diseño (búsqueda, cartelera, estadísticas) y las acciones de usuario (reservar, pagar, cancelar…). Toda escritura pasa por ellas porque validan sesión, dueño y estado; no hay permisos de escritura directos en las tablas. Las funciones internas, de workers y de administración **no** son ejecutables por visitantes ni usuarios.

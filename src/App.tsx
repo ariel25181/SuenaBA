@@ -17,6 +17,8 @@ import { ShowDetailModal } from './components/modals/ShowDetailModal.tsx';
 import { ReviewModal } from './components/modals/ReviewModal.tsx';
 import { NotificationsDrawer } from './components/modals/NotificationsDrawer.tsx';
 import { PWAInstallBanner } from './components/PWAInstallBanner.tsx';
+import { SessionProvider } from './context/SessionContext.tsx';
+import { ReservasApp } from './components/reservas/ReservasApp.tsx';
 
 import { VenueOpenCall, MusicianAvailability, LiveShowConfirmed } from './types/index.ts';
 import { Wifi, Battery, Signal, Sparkles } from 'lucide-react';
@@ -196,6 +198,8 @@ function MainApp() {
             />
           )}
 
+          {activeTab === 'reservas' && <ReservasApp />}
+
           {activeTab === 'perfil' && (
             <ProfileView
               viewingTarget={viewingTarget}
@@ -268,7 +272,9 @@ function MainApp() {
 export default function App() {
   return (
     <AppProvider>
-      <MainApp />
+      <SessionProvider>
+        <MainApp />
+      </SessionProvider>
     </AppProvider>
   );
 }
