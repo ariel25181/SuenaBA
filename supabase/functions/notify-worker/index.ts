@@ -13,7 +13,9 @@ import { handleWorkerRequest } from '../_shared/delivery.ts';
 import { resendSender, supabaseQueue, webPushSender } from '../_shared/providers.ts';
 
 const env = (k: string) => Deno.env.get(k) ?? '';
-webpush.setVapidDetails(env('VAPID_SUBJECT'), env('VAPID_PUBLIC_KEY'), env('VAPID_PRIVATE_KEY'));
+// La función arranca aunque todavía no estén cargadas las claves VAPID (el push falla con un mensaje claro y el email sigue andando).
+const vapidReady = !!(env('VAPID_SUBJECT') && env('VAPID_PUBLIC_KEY') && env('VAPID_PRIVATE_KEY'));
+if (vapidReady) webpush.setVapidDetails(env('VAPID_SUBJECT'), env('VAPID_PUBLIC_KEY'), env('VAPID_PRIVATE_KEY'));
 const admin = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { auth: { persistSession: false } });
 
 Deno.serve((req) => handleWorkerRequest(req, {
@@ -22,6 +24,6 @@ Deno.serve((req) => handleWorkerRequest(req, {
     appUrl: env('APP_URL'),
     ...supabaseQueue(admin),
     sendEmail: resendSender({ apiKey: env('RESEND_API_KEY'), from: env('EMAIL_FROM') }),
-    sendPush: webPushSender(webpush),
+    sendPush: vapidReady ? webPushSender(webpush) : async () => { throw new Error('vapid_not_configured'); },
   },
 }));

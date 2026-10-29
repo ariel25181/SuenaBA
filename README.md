@@ -149,10 +149,33 @@ Para comprobar que las pruebas detectan fallos: `MUTATE=overlap npm run test:db`
 
 ## Puesta en producción: avisos y cobros
 
+### Estado en el proyecto Supabase `SuenaBA` (dncmdvxcxizbcjacpkoe)
+| Paso | Estado |
+|---|---|
+| 6 migraciones + endurecimiento (`btree_gist` en `extensions`, `search_path` fijo, secuencia de auditoría) | ✅ Aplicadas y verificadas contra el repositorio (huella idéntica: 66 funciones, 199 columnas, 103 restricciones, 43 índices, 19 políticas) |
+| Permisos | ✅ Auditados: visitantes y usuarios no tienen escritura directa en ninguna tabla; las funciones internas, de workers y de administración no son ejecutables por ellos |
+| Prueba de humo real (con rollback) | ✅ Flujo completo + 16 controles de permisos |
+| Tareas automáticas en la base (`suenaba-vencimientos` cada 5 min, `suenaba-resenas` diaria) | ✅ Programadas |
+| Edge Functions `notify-worker`, `create-payment`, `mp-webhook`, `process-refunds` | ✅ Desplegadas y respondiendo (sin secretos devuelven "no configurado") |
+| Secretos (Resend, Mercado Pago, VAPID, secreto de workers) | ⏳ Los carga **vos** con `bash scripts/configurar-secretos.sh` (no se pueden crear cuentas ni claves desde acá) |
+| Tareas de avisos y reembolsos (cron + vault) | ⏳ SQL que imprime el script |
+| Pagos reales | ⏳ `payment_mode = 'simulado'` hasta que pruebes Mercado Pago en sandbox |
+
+> Las funciones se desplegaron con el conector (copias aplanadas: solo cambian las rutas de importación). Para redeplegar desde este repo: `supabase functions deploy create-payment` / `notify-worker --no-verify-jwt` / `mp-webhook --no-verify-jwt` / `process-refunds --no-verify-jwt`.
+
+### Lo que falta hacer (vos), en orden
+1. **Autenticación de Supabase** (Authentication → Providers → Email): para testers desactivá *Confirm email* (el correo integrado de Supabase está muy limitado) o configurá un SMTP propio; en *URL Configuration* poné la URL de tu sitio.
+2. `bash scripts/configurar-secretos.sh` (pregunta URL, Resend, Mercado Pago; genera solo las claves VAPID y el secreto de workers; **no muestra las claves**). Después pegá en el SQL Editor el bloque que imprime y cargá `VITE_VAPID_PUBLIC_KEY` en las variables de tu hosting.
+3. En Mercado Pago → Webhooks: URL `https://dncmdvxcxizbcjacpkoe.supabase.co/functions/v1/mp-webhook`, evento **Pagos**.
+4. **Beta con testers**: `update app_settings set auto_approve_profiles = true;` (los perfiles se crean solos, sin verificar). Para volver a aprobación manual: `= false`.
+5. Probá Mercado Pago en sandbox (`MP_SANDBOX=true`) y recién después: `update app_settings set payment_mode = 'mercadopago';`.
+
+### Referencia (instalación desde cero)
+
 Todo lo de esta sección corre en **Edge Functions de Supabase** (`supabase/functions/`). Los módulos en `_shared/` no dependen de Deno y están probados contra servidores falsos de Resend, push y Mercado Pago; los archivos `index.ts` solo conectan variables de entorno.
 
 ### 1. Aplicar las migraciones (en orden)
-`supabase-schema.sql` → `20261019000000_reservas.sql` → `20261020000000_airbnb_extras.sql` → `20261021000000_tour_novedades.sql` → `20261022000000_entrega_avisos.sql` → `20261023000000_mercado_pago.sql`.
+`supabase-schema.sql` → `20261019000000_reservas.sql` → `20261020000000_airbnb_extras.sql` → `20261021000000_tour_novedades.sql` → `20261022000000_entrega_avisos.sql` → `20261023000000_mercado_pago.sql` → `20261024000000_beta_abierta.sql`.
 
 ### 2. Avisos por email y push
 ```bash
@@ -160,13 +183,14 @@ npx web-push generate-vapid-keys                       # una vez
 supabase secrets set WORKER_SECRET=<mín. 16 caracteres> APP_URL=https://tu-sitio \
   RESEND_API_KEY=re_xxx EMAIL_FROM="SuenaBA <avisos@tudominio.com>" \
   VAPID_PUBLIC_KEY=... VAPID_PRIVATE_KEY=... VAPID_SUBJECT=mailto:vos@tudominio.com
-supabase functions deploy notify-worker
+supabase functions deploy notify-worker --no-verify-jwt
 ```
 En el front definí `VITE_VAPID_PUBLIC_KEY` (la clave pública). Programá el worker cada minuto (Supabase Cron / pg_cron):
 ```sql
-select cron.schedule('notify-worker', '* * * * *', $$ select net.http_post(
+-- (el script scripts/configurar-secretos.sh imprime este SQL ya completo, guardando el secreto en Vault)
+select cron.schedule('suenaba-avisos', '* * * * *', $$ select net.http_post(
   url := 'https://<proyecto>.supabase.co/functions/v1/notify-worker',
-  headers := jsonb_build_object('x-worker-secret', '<WORKER_SECRET>', 'Authorization', 'Bearer <SERVICE_ROLE_KEY>')) $$);
+  headers := jsonb_build_object('x-worker-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'worker_secret'))) $$);
 ```
 El dominio del remitente debe estar verificado en Resend. Entrega "al menos una vez": cada canal se marca por separado y el email usa clave de idempotencia.
 
@@ -176,7 +200,7 @@ El dominio del remitente debe estar verificado en Resend. Entrega "al menos una 
    supabase secrets set MP_ACCESS_TOKEN=APP_USR-... MP_WEBHOOK_SECRET=<clave secreta del webhook> APP_URL=https://tu-sitio  # MP_SANDBOX=true para pruebas
    supabase functions deploy create-payment
    supabase functions deploy mp-webhook --no-verify-jwt     # Mercado Pago no envía JWT: la seguridad es la firma
-   supabase functions deploy process-refunds
+   supabase functions deploy process-refunds --no-verify-jwt
    ```
 3. En Mercado Pago → Webhooks: URL `https://<proyecto>.supabase.co/functions/v1/mp-webhook`, evento **Pagos**.
 4. Programá `process-refunds` cada 5 minutos (igual que el worker de avisos, con `x-worker-secret`).
@@ -185,3 +209,6 @@ El dominio del remitente debe estar verificado en Resend. Entrega "al menos una 
 **Cobros a músicos**: Mercado Pago retiene el dinero en tu cuenta. Al realizarse el show se crea un pago pendiente (tabla `payouts`) con el alias/CBU/CVU del músico; el equipo transfiere y lo registra con `select admin_mark_payout_paid('<id>', '<referencia>')`. La lista de pendientes: `select * from payouts where status = 'pendiente'`. (Una transferencia automática requiere el producto de Marketplace/Split de Mercado Pago y un acuerdo comercial aparte.)
 
 **Operación diaria (service role)**: `select admin_review_profile_request('<id>', true, 'ok')`, `select admin_resolve_dispute('<reserva>', <% de reembolso>)`.
+
+### Advertencias del analizador de seguridad de Supabase (aceptadas a propósito)
+`anon_security_definer_function_executable` / `authenticated_security_definer_function_executable`: son las funciones públicas por diseño (búsqueda, cartelera, estadísticas) y las acciones de usuario (reservar, pagar, cancelar…). Toda escritura pasa por ellas porque validan sesión, dueño y estado; no hay permisos de escritura directos en las tablas. Las funciones internas, de workers y de administración **no** son ejecutables por visitantes ni usuarios.

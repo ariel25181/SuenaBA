@@ -79,6 +79,25 @@ describe('Acceso y alta de perfil', () => {
   });
 });
 
+describe('Beta abierta (testers)', () => {
+  it('un tester crea su cuenta, completa el alta y entra directo a la app, sin esperar aprobación', async () => {
+    await A.q('update app_settings set auto_approve_profiles = true');
+    presetPrefs('musico');
+    mount(null);
+    fireEvent.click(await screen.findByText('¿No tenés cuenta? Crear una', {}, T));
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'tester@beta.com' } });
+    fireEvent.change(screen.getByLabelText('Contraseña'), { target: { value: 'secreto123' } });
+    click('Crear cuenta');
+    await screen.findByText('Contanos quién sos', {}, T);
+    fireEvent.change(screen.getByLabelText('Nombre artístico'), { target: { value: 'Los Testers' } });
+    click('Enviar solicitud');
+    await screen.findByRole('button', { name: 'Explorar' }, T);                                   // ya está adentro
+    assert.ok(!screen.queryByText('Estamos revisando tu perfil'));
+    const p = (await A.q(`select role, verified from profiles where user_id = (select id from auth.users where email = 'tester@beta.com')`))[0];
+    assert.deepEqual([p.role, p.verified], ['musico', false]);
+  });
+});
+
 describe('Explorar y reservar (músico)', () => {
   it('lista fechas, filtra, guarda favoritos y solicita una reserva con el desglose de comisión', async () => {
     await A.q(`update app_settings set musician_fee_bps = 1000`);

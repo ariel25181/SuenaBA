@@ -9,7 +9,10 @@
 -- falta integrar Mercado Pago real.
 -- ==============================================================================
 
-create extension if not exists btree_gist;
+-- La extensión va en el esquema `extensions` (como pide el analizador de seguridad de Supabase); el search_path la encuentra.
+create schema if not exists extensions;
+set search_path = public, extensions;
+create extension if not exists btree_gist with schema extensions;
 
 -- ------------------------------------------------------------------------------
 -- 0. Endurecimiento: quitar políticas abiertas de escritura del esquema inicial
@@ -246,11 +249,11 @@ create policy reviews_own on public.booking_reviews for select to authenticated 
 -- 7. Funciones puras (fuente única de las reglas de dinero)
 -- ------------------------------------------------------------------------------
 create or replace function public.calc_fee(p_amount bigint, p_bps integer) returns bigint
-language sql immutable as $$ select (p_amount * p_bps) / 10000 $$;
+language sql immutable set search_path = public, pg_temp as $$ select (p_amount * p_bps) / 10000 $$;
 
 -- % de reembolso al cancelar el bar, según política y horas de anticipación
 create or replace function public.refund_pct(p_policy text, p_hours_before numeric) returns integer
-language sql immutable as $$
+language sql immutable set search_path = public, pg_temp as $$
   select case p_policy
     when 'flexible' then case when p_hours_before >= 24 then 100 else 50 end
     when 'moderada' then case when p_hours_before >= 72 then 100 when p_hours_before >= 24 then 50 else 0 end
@@ -261,7 +264,7 @@ $$;
 -- Reparto del dinero: reembolso al bar + pago al músico + ganancia de la plataforma = cobrado
 create or replace function public.settle_amounts(p_cachet bigint, p_venue_fee bigint, p_musician_bps integer, p_pct integer)
 returns table (refunded bigint, payout bigint, platform_fee bigint)
-language sql immutable as $$
+language sql immutable set search_path = public, pg_temp as $$
   with x as (select (p_cachet * p_pct) / 100 as rc, (p_venue_fee * p_pct) / 100 as rf)
   select x.rc + x.rf,
          (p_cachet - x.rc) - public.calc_fee(p_cachet - x.rc, p_musician_bps),
@@ -310,7 +313,7 @@ begin
 end $$;
 
 create or replace function public._role_in(p public.profiles, b public.bookings) returns text
-language sql immutable as $$
+language sql immutable set search_path = public, pg_temp as $$
   select case when p.venue_id is not null and p.venue_id = b.venue_id then 'bar'
               when p.musician_id is not null and p.musician_id = b.musician_id then 'musico' end
 $$;
@@ -765,6 +768,8 @@ begin
              'fund_booking','cancel_booking','complete_booking','report_problem','submit_review','send_message')
   loop execute format('revoke all on function %s from public, anon, authenticated', f); end loop;
 end $$;
+-- la secuencia de auditoría no debe ser usable por clientes (Supabase la concede por defecto)
+revoke all on sequence public.booking_events_id_seq from anon, authenticated;
 grant execute on function public.create_listing(timestamptz, timestamptz, bigint, text[], text[], text, text, text) to authenticated;
 grant execute on function public.cancel_listing(uuid) to authenticated;
 grant execute on function public.request_booking(uuid, bigint, text) to authenticated;

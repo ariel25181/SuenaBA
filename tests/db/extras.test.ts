@@ -353,6 +353,31 @@ describe('Verificación de perfiles', () => {
       await fails(A.requestProfile(u, { role: 'musico', name: 'Banda', evidence: url }), 'invalid_evidence');
     await assert.rejects(asUser(pool, u, (c) => c.query(`select * from admin_review_profile_request(gen_random_uuid(), true)`)), (e: any) => e.code === '42501');
   });
+  it('beta abierta: el alta es automática (sin verificar), avisa al usuario y se puede apagar', async () => {
+    await A.q('update app_settings set auto_approve_profiles = true');
+    const u = await newUser();
+    const r = await A.requestProfile(u, { role: 'bar', name: 'Bar Beta', neighborhood: 'Palermo Soho', address: 'Honduras 100' });
+    assert.deepEqual([r.status, r.reviewer_note], ['aprobada', 'Alta automática (beta abierta)']);
+    const prof = (await A.q('select * from profiles where user_id = $1', [u]))[0];
+    assert.deepEqual([prof.role, prof.verified], ['bar', false]);
+    assert.equal((await A.q('select name from venues where id = $1', [prof.venue_id]))[0].name, 'Bar Beta');
+    assert.deepEqual(await kinds(u), ['profile_approved']);
+    assert.equal((await A.q(`select title from notifications where user_id = $1`, [u]))[0].title, '¡Tu perfil está listo!');
+    await fails(A.requestProfile(u, { role: 'musico', name: 'Otro' }), 'profile_exists');
+    const m = await newUser();                                                                         // músico: la validación sigue igual
+    await fails(A.requestProfile(m, { role: 'musico', name: 'X' }), 'invalid_request');
+    assert.equal((await A.requestProfile(m, { role: 'musico', name: 'Los Beta', evidence: 'https://youtube.com/x' })).status, 'aprobada');
+    // con verificación obligatoria los perfiles de beta no pueden publicar hasta que el equipo los verifique
+    await A.q('update app_settings set require_verification = true');
+    await fails(A.createListing({ userId: u, role: 'bar', entityId: prof.venue_id }, { starts: day(10), ends: plus(day(10), 3 * H), cachet: 1 } as any), 'not_verified');
+    await A.q('update profiles set verified = true where user_id = $1', [u]);
+    assert.equal((await A.createListing({ userId: u, role: 'bar', entityId: prof.venue_id }, { starts: day(10), ends: plus(day(10), 3 * H), cachet: 1 } as any)).status, 'abierta');
+    // apagada: vuelve la aprobación manual
+    await A.q('update app_settings set auto_approve_profiles = false, require_verification = false');
+    const w = await newUser();
+    assert.equal((await A.requestProfile(w, { role: 'musico', name: 'Manuales' })).status, 'pendiente');
+    assert.equal((await A.q('select count(*)::int n from profiles where user_id = $1', [w]))[0].n, 0);
+  });
   it('con verificación obligatoria, los perfiles sin verificar no pueden operar', async () => {
     await A.q('update app_settings set require_verification = true');
     await fails(listing(bar1, 10), 'not_verified');

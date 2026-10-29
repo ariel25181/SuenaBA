@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "test": "node --import tsx --test \"src/**/*.test.ts\" \"tests/scripts/*.test.ts\"",
     "test:db": "node --import tsx --test --test-concurrency=1 --test-force-exit --test-timeout=240000 \"tests/db/*.test.ts\"",
     "test:ui": "node --import tsx --test --test-concurrency=1 --test-force-exit --test-timeout=120000 \"tests/ui/*.test.tsx\"",
     "test:all": "npm test && npm run test:db && npm run test:delivery && npm run test:ui",

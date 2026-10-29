@@ -50,7 +50,7 @@ create table if not exists public.payment_refunds (
 create index if not exists payment_refunds_queue_idx on public.payment_refunds (next_attempt_at) where status = 'pendiente';
 
 -- CBU/CVU (exactamente 22 dígitos) o alias (6-20 caracteres con al menos una letra: un número truncado no se toma por alias)
-create or replace function public.valid_payout_alias(a text) returns boolean language sql immutable as
+create or replace function public.valid_payout_alias(a text) returns boolean language sql immutable set search_path = public, pg_temp as
 $$ select a ~ '^[0-9]{22}$' or (a ~ '^[A-Za-z0-9.-]{6,20}$' and a ~ '[A-Za-z]') $$;
 alter table public.profiles add column if not exists payout_alias text check (payout_alias is null or public.valid_payout_alias(payout_alias));
 

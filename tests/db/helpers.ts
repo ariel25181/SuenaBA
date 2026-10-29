@@ -10,7 +10,7 @@ pg.types.setTypeParser(1700, (v: string) => parseFloat(v));
 
 export const ADMIN_URL = process.env.TEST_DATABASE_URL || 'postgres://postgres:pw@localhost:5432/postgres';
 const ROOT = path.resolve(import.meta.dirname, '../..');
-const SQL_FILES = ['tests/db/00_supabase_stub.sql', 'supabase-schema.sql', 'supabase/migrations/20261019000000_reservas.sql', 'supabase/migrations/20261020000000_airbnb_extras.sql', 'supabase/migrations/20261021000000_tour_novedades.sql', 'supabase/migrations/20261022000000_entrega_avisos.sql', 'supabase/migrations/20261023000000_mercado_pago.sql'];
+const SQL_FILES = ['tests/db/00_supabase_stub.sql', 'supabase-schema.sql', 'supabase/migrations/20261019000000_reservas.sql', 'supabase/migrations/20261020000000_airbnb_extras.sql', 'supabase/migrations/20261021000000_tour_novedades.sql', 'supabase/migrations/20261022000000_entrega_avisos.sql', 'supabase/migrations/20261023000000_mercado_pago.sql', 'supabase/migrations/20261024000000_beta_abierta.sql'];
 
 /** Crea una base limpia con el esquema real + migración y devuelve un Pool. */
 export async function createTestDb(name: string, poolSize = 30): Promise<pg.Pool> {
@@ -174,7 +174,7 @@ export async function resetData(pool: pg.Pool) {
   await pool.query(`truncate public.payouts, public.payment_refunds, public.payment_intents, public.push_subscriptions, public.notification_prefs, public.user_prefs, public.notifications, public.favorites, public.saved_searches, public.profile_requests, public.messages, public.booking_reviews, public.payments, public.booking_events,
     public.bookings, public.listings, public.profiles cascade;
     delete from auth.users; delete from public.venues where id like 't-%' or id like 'sim-%'; delete from public.musicians where id like 't-%' or id like 'sim-%';
-    update public.app_settings set venue_fee_bps = 0, musician_fee_bps = 0, max_pending_requests = 20, request_ttl_hours = 48, fund_ttl_hours = 48, review_window_days = 14, require_verification = false, payment_mode = 'simulado', superhost_min_shows = 5, superhost_min_rating = 4.7, superhost_max_cancel_pct = 2, superhost_min_response_pct = 90`);
+    update public.app_settings set venue_fee_bps = 0, musician_fee_bps = 0, max_pending_requests = 20, request_ttl_hours = 48, fund_ttl_hours = 48, review_window_days = 14, require_verification = false, auto_approve_profiles = false, payment_mode = 'simulado', superhost_min_shows = 5, superhost_min_rating = 4.7, superhost_max_cancel_pct = 2, superhost_min_response_pct = 90`);
 }
 
 const ALLOWED: Record<string, string[]> = {
